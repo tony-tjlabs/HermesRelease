@@ -1,0 +1,3 @@
+sward_name,install_location,rssi_threshold,min_dwell_time
+210002D6,inside_of_store,-75,60
+210002D7,entrance_of_store,-75,0

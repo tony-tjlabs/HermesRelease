@@ -1,0 +1,10 @@
+pandas>=2.0.0
+numpy>=1.24.0
+streamlit>=1.28.0
+plotly>=5.18.0
+pyarrow>=14.0.0
+holidays>=0.46
+certifi>=2024.2.2
+python-dotenv>=1.0.0
+fpdf2>=2.7.0
+matplotlib>=3.7.0
