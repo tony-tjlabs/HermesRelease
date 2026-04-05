@@ -1,0 +1,72 @@
+[
+  {
+    "date": "2026-03-23",
+    "floating_unique": 10599,
+    "visitor_count": 423,
+    "conversion_rate": 3.99,
+    "dwell_seconds_mean": 298.09,
+    "floating_unique_raw": 4226,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 150.8
+  },
+  {
+    "date": "2026-03-24",
+    "floating_unique": 14216,
+    "visitor_count": 607,
+    "conversion_rate": 4.27,
+    "dwell_seconds_mean": 353.9,
+    "floating_unique_raw": 6019,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 136.19
+  },
+  {
+    "date": "2026-03-25",
+    "floating_unique": 15178,
+    "visitor_count": 585,
+    "conversion_rate": 3.85,
+    "dwell_seconds_mean": 375.69,
+    "floating_unique_raw": 5993,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 153.26
+  },
+  {
+    "date": "2026-03-26",
+    "floating_unique": 10496,
+    "visitor_count": 425,
+    "conversion_rate": 4.05,
+    "dwell_seconds_mean": 492.09,
+    "floating_unique_raw": 4859,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 116.01
+  },
+  {
+    "date": "2026-03-27",
+    "floating_unique": 13052,
+    "visitor_count": 397,
+    "conversion_rate": 3.04,
+    "dwell_seconds_mean": 433.02,
+    "floating_unique_raw": 4592,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 184.23
+  },
+  {
+    "date": "2026-03-28",
+    "floating_unique": 6874,
+    "visitor_count": 224,
+    "conversion_rate": 3.26,
+    "dwell_seconds_mean": 291.34,
+    "floating_unique_raw": 3145,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 118.57
+  },
+  {
+    "date": "2026-03-29",
+    "floating_unique": 6099,
+    "visitor_count": 245,
+    "conversion_rate": 4.02,
+    "dwell_seconds_mean": 291.02,
+    "floating_unique_raw": 2970,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 105.35
+  }
+]

@@ -1,0 +1,1049 @@
+"""
+Hermes Dashboard v3 — AI-First Redesign.
+
+Two modes in one file:
+  - Daily Analysis: KPI -> Daily Trend -> Hourly -> Dwell -> AI (3-section)
+  - Period Comparison: Summary Table -> Trend -> Dwell -> AI (3-section)
+
+Simplified from v2: removed redundant sections, enhanced AI prompts
+with advertising/location/operations perspectives.
+Dark theme, metric-card/section-header/ai-comment CSS classes.
+"""
+from __future__ import annotations
+
+import json
+import re
+from typing import Optional
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+from src.cache.cache_io import CacheLoader
+from src.analytics.uplift import compute_week_over_week
+from src.analytics.hourly_analysis import hourly_stats_flexible, identify_peak_hours
+from src.ui.helpers import (
+    has_api_key,
+    render_metric_card, make_plotly_layout,
+    render_section_header, render_ai_comment,
+)
+from src.ai import call_claude
+from config import REGISTERED_SECTORS
+
+
+# -- Color Palette ---------------------------------------------------------
+
+FP_COLOR = "#4A90D9"      # Blue for Floating Pop
+VISITOR_COLOR = "#64ffda"  # Teal for Visitors
+GOLD = "#c49a3a"
+AMBER = "#d97706"
+SLATE_GRAY = "#64748b"
+
+
+def _get_sector_context(space_name: str) -> str:
+    """Build a short domain context string for AI prompts from REGISTERED_SECTORS."""
+    meta = REGISTERED_SECTORS.get(space_name, {})
+    desc = meta.get("description", "")
+    loc = meta.get("location", "")
+    stype = meta.get("store_type", "retail")
+    if desc:
+        return f"[Store Context: {desc} Location: {loc}. Type: {stype}]"
+    return f"[Store: {space_name}]"
+
+
+# -- Cached Wrappers -------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def _cached_wow(daily_stats: pd.DataFrame, days_per_week: int = 7) -> dict:
+    return compute_week_over_week(daily_stats, days_per_week=days_per_week)
+
+
+
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_ai_daily(metrics_json: str, space_notes: str = "", lang: str = "English") -> str:
+    """Cache AI analysis result for daily mode."""
+    metrics = json.loads(metrics_json)
+    system_prompt = (
+        "You are a Hermes retail spatial intelligence analyst specializing in small-store analytics. "
+        "Data comes from BLE S-Ward sensors (10-second sampling). "
+        "FP = Floating Population (unique MACs near store). "
+        "Visitors = verified entries via 3-stage filter (session + min dwell + 80% RSSI pass). "
+        "CVR = Visitors/FP. Quality CVR counts only medium+long dwell visitors. "
+        "Dwell = entry-to-exit time per session. MAC randomization means FP counts are approximate. "
+        "You must structure your response with labeled sections as requested in the user prompt. "
+        "Focus on actionable insights: advertising timing, location value, and store operations. "
+        "Include specific numbers."
+    )
+    user_prompt = _build_daily_ai_prompt(metrics)
+    return call_claude(user_prompt, system=system_prompt, space_notes=space_notes, lang=lang)
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_ai_comparison(metrics_json: str, space_notes: str = "", lang: str = "English") -> str:
+    """Cache AI analysis result for comparison mode."""
+    metrics = json.loads(metrics_json)
+    system_prompt = (
+        "You are a Hermes retail spatial intelligence analyst specializing in small-store analytics. "
+        "Data comes from BLE S-Ward sensors (10-second sampling). "
+        "FP = Floating Population (unique MACs near store). "
+        "Visitors = verified entries via 3-stage filter (session + min dwell + 80% RSSI pass). "
+        "CVR = Visitors/FP. Quality CVR counts only medium+long dwell visitors. "
+        "MAC randomization means FP is approximate but trends are reliable. "
+        "You must structure your response with labeled sections as requested in the user prompt. "
+        "Focus on actionable strategy: promotion timing, location value assessment, and operations. "
+        "Include specific numbers."
+    )
+    user_prompt = _build_comparison_ai_prompt(metrics)
+    return call_claude(user_prompt, system=system_prompt, space_notes=space_notes, lang=lang)
+
+
+# -- Main Entry Point ------------------------------------------------------
+
+def render_dashboard(
+    space_name: str,
+    loader: CacheLoader,
+    selected_date: Optional[str] = None,
+    time_range: tuple[int, int] = (7, 23),
+    mode: str = "daily",
+) -> None:
+    """
+    Render dashboard in daily or comparison mode.
+
+    Parameters
+    ----------
+    space_name : str
+    loader : CacheLoader
+    selected_date : str | None
+        Selected date for daily mode
+    time_range : tuple[int, int]
+        Hour range filter (start, end)
+    mode : str
+        "daily" or "comparison"
+    """
+    if mode == "daily":
+        _render_daily(space_name, loader, selected_date, time_range)
+    else:
+        _render_comparison(space_name, loader, time_range)
+
+
+# ===========================================================================
+#  DAILY ANALYSIS MODE
+# ===========================================================================
+
+def _render_daily(
+    space_name: str,
+    loader: CacheLoader,
+    selected_date: Optional[str],
+    time_range: tuple[int, int],
+) -> None:
+    """Single-date deep dive: KPI -> Trend -> Hourly -> Dwell -> AI."""
+
+    daily_stats = loader.get_daily_stats()
+    daily_hourly = loader.get_daily_hourly()
+    daily_timeseries = loader.get_daily_timeseries()
+    sessions = loader.get_sessions_stitched()
+    if sessions.empty:
+        sessions = loader.get_sessions_all()
+
+    if daily_stats.empty:
+        st.info("No data available. Run preprocessing first.")
+        return
+
+    available_dates = loader.get_date_range() or []
+    if not available_dates:
+        st.warning("No dates available.")
+        return
+
+    # Use selected_date or latest
+    if selected_date and selected_date in available_dates:
+        date_str = selected_date
+    else:
+        date_str = available_dates[-1]
+
+    # Get daily row
+    ds = daily_stats[daily_stats["date"].astype(str) == date_str]
+    if ds.empty:
+        st.warning(f"No data for {date_str}.")
+        return
+
+    row = ds.iloc[0]
+
+    # Header with weather context
+    header = f"## {date_str}"
+    weather_badge = ""
+    if "weather" in ds.columns:
+        w = row.get("weather", "")
+        w_icon = {"Sunny": "☀️", "Rain": "🌧️", "Snow": "❄️"}.get(str(w), "")
+        temp_str = ""
+        if "temp_max" in ds.columns and "temp_min" in ds.columns:
+            tmax = row.get("temp_max", 0)
+            tmin = row.get("temp_min", 0)
+            temp_str = f" {tmin:.0f}~{tmax:.0f}°C"
+        weather_badge = f"&nbsp;&nbsp;{w_icon} {w}{temp_str}"
+    st.markdown(f"{header}{weather_badge}", unsafe_allow_html=True)
+
+    # -- KPI Cards --
+    has_quality = "quality_cvr" in daily_stats.columns
+    has_median = "dwell_median_seconds" in daily_stats.columns
+
+    fp_val = int(row.get("floating_unique", 0))
+    v_val = int(row.get("visitor_count", 0))
+    cvr_val = row.get("quality_cvr" if has_quality else "conversion_rate", 0)
+    if has_median:
+        dwell_sec = row.get("dwell_median_seconds", 0)
+    else:
+        dwell_sec = row.get("dwell_seconds_mean", 0)
+    mm, ss = int(dwell_sec) // 60, int(dwell_sec) % 60
+
+    cols = st.columns(4)
+    with cols[0]:
+        render_metric_card("Floating Population", f"{fp_val:,}", "Unique MACs near store")
+    with cols[1]:
+        render_metric_card("Visitors", f"{v_val:,}", "Entered store interior")
+    with cols[2]:
+        cvr_label = "Quality CVR" if has_quality else "CVR"
+        render_metric_card(cvr_label, f"{cvr_val:.1f}%", "Visitors / FP")
+    with cols[3]:
+        dwell_label = "Median Dwell" if has_median else "Avg Dwell"
+        render_metric_card(dwell_label, f"{mm}m {ss}s", "Time inside store")
+
+    # -- Intraday Traffic Pattern --
+    render_section_header("Intraday Traffic Pattern")
+
+    # Resolution selector
+    bin_options = {"5 min": 5, "10 min": 10, "30 min": 30, "1 hour": 60}
+    col_res, _ = st.columns([1, 3])
+    with col_res:
+        bin_label = st.selectbox(
+            "Resolution",
+            list(bin_options.keys()),
+            index=2,  # default: 30 min
+            key="dashboard_bin_resolution",
+        )
+    bin_minutes = bin_options[bin_label]
+
+    if not daily_hourly.empty:
+        h_df = hourly_stats_flexible(
+            daily_hourly, sessions, daily_timeseries,
+            [date_str], bin_minutes=bin_minutes,
+        )
+
+        if not h_df.empty:
+            # Filter by time_range
+            h_df_filtered = h_df.copy()
+            if time_range:
+                start_bin = time_range[0] * 60 // bin_minutes
+                end_bin = time_range[1] * 60 // bin_minutes
+                h_df_filtered = h_df_filtered[
+                    (h_df_filtered["bin_idx"] >= start_bin)
+                    & (h_df_filtered["bin_idx"] < end_bin)
+                ]
+
+            # Peak hours
+            peaks = identify_peak_hours(h_df_filtered, metric="visitor_count", top_n=3)
+            if peaks:
+                peak_cols = st.columns(3)
+                for i, p in enumerate(peaks):
+                    with peak_cols[i]:
+                        render_metric_card(
+                            f"Peak #{p['rank']}: {p['bin_label']}",
+                            f"{int(p['visitors'])} visitors",
+                            f"FP: {int(p['fp'])} | CVR: {p['cvr']:.1f}%",
+                        )
+
+            # Bar chart: FP + Visitors + CVR overlay
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=h_df_filtered["bin_label"], y=h_df_filtered["floating_count"],
+                name="Floating Pop",
+                marker_color=FP_COLOR, opacity=0.7,
+            ))
+            fig.add_trace(go.Bar(
+                x=h_df_filtered["bin_label"], y=h_df_filtered["visitor_count"],
+                name="Visitors",
+                marker_color=VISITOR_COLOR,
+            ))
+            fig.add_trace(go.Scatter(
+                x=h_df_filtered["bin_label"], y=h_df_filtered["cvr_pct"],
+                name="CVR (%)", yaxis="y2",
+                line=dict(color=AMBER, width=2.5),
+                mode="lines+markers", marker=dict(size=3),
+            ))
+            chart_title = f"FP & Visitors ({bin_label} bins)"
+            layout = make_plotly_layout(chart_title, height=380)
+            layout["barmode"] = "group"
+            layout["yaxis2"] = dict(
+                title=dict(text="CVR (%)", font=dict(color=AMBER)),
+                overlaying="y", side="right",
+                range=[0, max(h_df_filtered["cvr_pct"].max() * 1.3, 15)] if not h_df_filtered.empty else [0, 15],
+                gridcolor="#1a2035",
+                tickfont=dict(color=AMBER),
+            )
+            fig.update_layout(**layout)
+            # Show every Nth label to avoid overlap on 5-min bins
+            tick_interval = max(1, len(h_df_filtered) // 24)
+            fig.update_layout(xaxis=dict(
+                tickangle=-45,
+                dtick=tick_interval,
+            ))
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.caption("No traffic data available for this date.")
+
+    # -- Dwell Funnel --
+    render_section_header("Dwell Time Distribution")
+
+    has_funnel = all(
+        c in row.index
+        for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count"]
+    )
+
+    if has_funnel:
+        short = int(row.get("short_dwell_count", 0))
+        medium = int(row.get("medium_dwell_count", 0))
+        long_ = int(row.get("long_dwell_count", 0))
+        total_v = short + medium + long_ or 1
+        quality_count = medium + long_
+        quality_pct = quality_count / total_v * 100
+
+        fc2 = st.columns(4)
+        with fc2[0]:
+            render_metric_card("Short (<3min)", f"{short / total_v * 100:.1f}%", f"{short} visitors")
+        with fc2[1]:
+            render_metric_card("Medium (3-10min)", f"{medium / total_v * 100:.1f}%", f"{medium} visitors")
+        with fc2[2]:
+            render_metric_card("Long (10min+)", f"{long_ / total_v * 100:.1f}%", f"{long_} visitors")
+        with fc2[3]:
+            render_metric_card("Quality Visitors", f"{quality_pct:.1f}%", f"{quality_count} of {total_v}")
+
+        # Dwell funnel bar
+        dwell_data = pd.DataFrame([
+            {"Category": "Short (<3min)", "Count": short, "Color": SLATE_GRAY},
+            {"Category": "Medium (3-10min)", "Count": medium, "Color": FP_COLOR},
+            {"Category": "Long (10min+)", "Count": long_, "Color": VISITOR_COLOR},
+        ])
+        fig = go.Figure()
+        for _, r in dwell_data.iterrows():
+            pct = r["Count"] / total_v * 100
+            fig.add_trace(go.Bar(
+                x=[r["Category"]],
+                y=[r["Count"]],
+                name=r["Category"],
+                marker_color=r["Color"],
+                text=[f"{r['Count']} ({pct:.0f}%)"],
+                textposition="outside",
+                textfont=dict(color="#ccd6f6", size=11),
+            ))
+        fig.update_layout(**make_plotly_layout("Dwell Categories", height=350))
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.caption("Dwell funnel data not available.")
+
+    # -- Device Mix (iPhone vs Android) --
+    _render_device_mix_daily(loader, date_str)
+
+    # -- Detail Table (expandable) --
+    with st.expander("Daily Detail Table"):
+        detail_cols = ["date", "floating_unique", "visitor_count", "conversion_rate"]
+        if has_quality:
+            detail_cols.append("quality_cvr")
+        if has_median:
+            detail_cols.append("dwell_median_seconds")
+        else:
+            detail_cols.append("dwell_seconds_mean")
+        if "day_type" in daily_stats.columns:
+            detail_cols.append("day_type")
+        if "weather" in daily_stats.columns:
+            detail_cols.append("weather")
+
+        detail = daily_stats[[c for c in detail_cols if c in daily_stats.columns]].copy()
+        detail = detail.sort_values("date", ascending=False)
+        st.dataframe(detail, use_container_width=True, hide_index=True, height=400)
+
+    # -- AI Analysis --
+    st.markdown("---")
+    render_section_header("AI Analysis")
+    st.caption("AI analyzes store traffic patterns and provides actionable insights.")
+
+    if not has_api_key():
+        st.info("Set ANTHROPIC_API_KEY in environment or secrets to enable AI.")
+        return
+
+    col_btn, col_lang = st.columns([3, 1])
+    with col_lang:
+        ai_lang = st.selectbox("Language", ["English", "한국어"], key="daily_ai_lang", label_visibility="collapsed")
+    with col_btn:
+        if st.button("Generate AI Analysis", type="primary", use_container_width=True, key="daily_ai_btn"):
+            _run_daily_ai(space_name, row, daily_stats, loader, date_str, time_range, lang=ai_lang)
+
+
+def _render_ai_sections(text: str, section_labels: list[str]) -> None:
+    """Render AI response as ai-comment boxes.
+
+    Tries to split by section labels (PERFORMANCE, BEHAVIOR, etc.).
+    Handles both English and Korean responses where model may output
+    "한국어제목 (EnglishLabel)" or "## EnglishLabel" formats.
+    Falls back to a single box if no labels found.
+    """
+    if not text or not text.strip():
+        return
+
+    # Build regex: match lines that contain any of the section labels
+    # e.g. "PERFORMANCE:", "## Performance", "성과 분석 (PERFORMANCE)", "**PERFORMANCE**"
+    label_pattern = "|".join(re.escape(lb) for lb in section_labels)
+    # Match a line that contains a label (possibly with Korean prefix, ##, **, :, etc.)
+    split_re = re.compile(
+        rf"^.*?({label_pattern}).*?$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    parts = split_re.split(text)
+    # parts = [preamble, label1, content1, label2, content2, ...]
+
+    sections: list[tuple[str, str]] = []
+    if len(parts) >= 3:
+        # Skip preamble (parts[0]), then pair (label, content)
+        i = 1
+        while i < len(parts) - 1:
+            label = parts[i].strip()
+            content = parts[i + 1].strip()
+            # Clean up content: remove leading ), }, #, *, etc.
+            content = re.sub(r"^[\)\}\]\*#\s:]+", "", content).strip()
+            if content:
+                sections.append((label.title(), content))
+            i += 2
+
+    if not sections:
+        # Fallback: render as single block
+        render_ai_comment("AI Insights", text.strip())
+    else:
+        for title, content in sections:
+            render_ai_comment(title, content)
+
+
+def _run_daily_ai(
+    space_name: str,
+    row: pd.Series,
+    daily_stats: pd.DataFrame,
+    loader: CacheLoader,
+    date_str: str,
+    time_range: tuple[int, int],
+    lang: str = "English",
+) -> None:
+    """Run AI analysis for daily mode."""
+
+    has_quality = "quality_cvr" in daily_stats.columns
+    has_median = "dwell_median_seconds" in daily_stats.columns
+
+    metrics = {
+        "space_name": space_name,
+        "date": date_str,
+        "time_range": list(time_range),
+        "fp": int(row.get("floating_unique", 0)),
+        "visitors": int(row.get("visitor_count", 0)),
+        "cvr": float(row.get("quality_cvr" if has_quality else "conversion_rate", 0)),
+        "dwell_sec": float(row.get("dwell_median_seconds" if has_median else "dwell_seconds_mean", 0)),
+        "has_quality": has_quality,
+    }
+
+    # Add funnel data
+    if "short_dwell_count" in row.index:
+        total_v = int(row.get("visitor_count", 1)) or 1
+        metrics["short_pct"] = int(row.get("short_dwell_count", 0)) / total_v * 100
+        metrics["medium_pct"] = int(row.get("medium_dwell_count", 0)) / total_v * 100
+        metrics["long_pct"] = int(row.get("long_dwell_count", 0)) / total_v * 100
+
+    # Add day type / weather (including temperature & precipitation)
+    if "day_type" in row.index:
+        metrics["day_type"] = str(row.get("day_type", ""))
+    if "weather" in row.index:
+        metrics["weather"] = str(row.get("weather", ""))
+    if "temp_max" in row.index:
+        metrics["temp_max"] = float(row.get("temp_max", 0))
+    if "temp_min" in row.index:
+        metrics["temp_min"] = float(row.get("temp_min", 0))
+    if "precipitation" in row.index:
+        metrics["precipitation"] = float(row.get("precipitation", 0))
+
+    # Recent 14-day context table (for AI to compare against)
+    qc = "quality_cvr" if has_quality else "conversion_rate"
+    dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
+    sorted_stats = daily_stats.sort_values("date")
+    recent_14 = sorted_stats.tail(14)
+
+    if len(recent_14) >= 2:
+        recent_rows = []
+        for _, r in recent_14.iterrows():
+            entry = {
+                "date": str(r["date"]),
+                "fp": int(r.get("floating_unique", 0)),
+                "visitors": int(r.get("visitor_count", 0)),
+                "cvr": round(float(r.get(qc, 0)), 1),
+                "dwell_min": round(float(r.get(dwell_col, 0)) / 60, 1),
+            }
+            if "day_type" in r.index:
+                entry["day_type"] = str(r.get("day_type", ""))
+            if "weather" in r.index:
+                entry["weather"] = str(r.get("weather", ""))
+            if "temp_max" in r.index:
+                entry["temp"] = f"{r.get('temp_min', 0):.0f}~{r.get('temp_max', 0):.0f}"
+            recent_rows.append(entry)
+        metrics["recent_14_days"] = recent_rows
+        metrics["period_avg_fp"] = float(recent_14["floating_unique"].mean())
+        metrics["period_avg_v"] = float(recent_14["visitor_count"].mean())
+        metrics["period_avg_cvr"] = float(recent_14[qc].mean())
+
+    space_notes = st.session_state.get("current_space_notes", "")
+    with st.spinner("AI is analyzing..."):
+        result = _cached_ai_daily(json.dumps(metrics, default=str), space_notes=space_notes, lang=lang)
+
+    if result and not result.startswith("\u26a0\ufe0f"):
+        _render_ai_sections(result, ["PERFORMANCE", "BEHAVIOR", "RECOMMENDATIONS"])
+    else:
+        st.warning(result if result else "AI analysis failed.")
+
+
+# ===========================================================================
+#  PERIOD COMPARISON MODE
+# ===========================================================================
+
+def _render_comparison(
+    space_name: str,
+    loader: CacheLoader,
+    time_range: tuple[int, int],
+) -> None:
+    """Multi-date comparison: Summary -> Trend -> Dwell -> AI."""
+
+    daily_stats = loader.get_daily_stats()
+    if daily_stats.empty:
+        st.info("No data available.")
+        return
+
+    available_dates = loader.get_date_range() or []
+    if len(available_dates) < 2:
+        st.warning("Need at least 2 dates for comparison.")
+        return
+
+    st.markdown("## Period Comparison Analysis")
+
+    ds = daily_stats.sort_values("date")
+    has_quality = "quality_cvr" in ds.columns
+    has_median = "dwell_median_seconds" in ds.columns
+    qc = "quality_cvr" if has_quality else "conversion_rate"
+    dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
+
+    # -- KPI summary cards (first) --
+    avg_fp = ds["floating_unique"].mean()
+    avg_v = ds["visitor_count"].mean()
+    avg_cvr = ds[qc].mean()
+    avg_dwell = ds[dwell_col].mean()
+    mm, ss = int(avg_dwell) // 60, int(avg_dwell) % 60
+
+    st.caption(f"Period: {ds['date'].iloc[0]} ~ {ds['date'].iloc[-1]} ({len(ds)} days)")
+
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        render_metric_card("Avg Daily FP", f"{avg_fp:,.0f}", f"{len(ds)} days")
+    with kpi_cols[1]:
+        render_metric_card("Avg Daily Visitors", f"{avg_v:,.0f}", "")
+    with kpi_cols[2]:
+        render_metric_card("Avg CVR", f"{avg_cvr:.1f}%", "")
+    with kpi_cols[3]:
+        render_metric_card("Avg Dwell", f"{mm}m {ss}s", "")
+
+    # -- WoW Comparison --
+    if len(ds) >= 14:
+        render_section_header("Week-over-Week Comparison")
+        wow = _cached_wow(ds)
+        if wow:
+            tw = wow.get("this_week", {})
+            d = wow.get("delta", {})
+            wow_cols = st.columns(4)
+            with wow_cols[0]:
+                st.metric("FP (This Week)", f"{tw.get('floating_unique', 0):,.0f}",
+                          f"{d.get('floating_pct', 0):+.1f}% WoW")
+            with wow_cols[1]:
+                v_key = "quality_visitor_count" if has_quality else "visitor_count"
+                st.metric("Visitors", f"{tw.get(v_key, 0):,.0f}",
+                          f"{d.get('quality_visitor_pct' if has_quality else 'visitor_pct', 0):+.1f}% WoW")
+            with wow_cols[2]:
+                st.metric("CVR", f"{tw.get(qc, 0):.1f}%",
+                          f"{d.get('quality_cvr_pp' if has_quality else 'cvr_pp', 0):+.1f}pp WoW")
+            with wow_cols[3]:
+                dm = tw.get("dwell_median_seconds", 0)
+                st.metric("Dwell", f"{int(dm)//60}m {int(dm)%60}s",
+                          f"{d.get('dwell_median', 0):+.0f}s WoW")
+
+    # -- Traffic Trend --
+    render_section_header("Daily Traffic Trend")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=ds["date"].astype(str), y=ds["floating_unique"],
+        name="Floating Pop",
+        line=dict(color=FP_COLOR, width=2),
+        mode="lines+markers",
+    ))
+    fig.add_trace(go.Scatter(
+        x=ds["date"].astype(str), y=ds["visitor_count"],
+        name="Visitors",
+        line=dict(color=VISITOR_COLOR, width=2),
+        mode="lines+markers",
+    ))
+    fig.update_layout(**make_plotly_layout("FP & Visitors Over Time"))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # -- CVR Trend --
+    render_section_header("CVR Trend")
+
+    fig_cvr = go.Figure()
+    fig_cvr.add_trace(go.Scatter(
+        x=ds["date"].astype(str), y=ds[qc],
+        name="CVR (%)",
+        line=dict(color=AMBER, width=2.5),
+        mode="lines+markers",
+        fill="tozeroy",
+        fillcolor="rgba(217,119,6,0.1)",
+    ))
+    fig_cvr.update_layout(**make_plotly_layout("Conversion Rate (%)", height=300))
+    st.plotly_chart(fig_cvr, use_container_width=True)
+
+    # -- Device Mix Trend --
+    _render_device_mix_comparison(loader)
+
+    # -- Dwell Trend --
+    has_funnel = all(c in ds.columns for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count"])
+    if has_funnel:
+        render_section_header("Dwell Distribution Over Time")
+        fig_dwell = go.Figure()
+        fig_dwell.add_trace(go.Bar(
+            x=ds["date"].astype(str), y=ds["short_dwell_count"],
+            name="Short (<3min)", marker_color=SLATE_GRAY,
+        ))
+        fig_dwell.add_trace(go.Bar(
+            x=ds["date"].astype(str), y=ds["medium_dwell_count"],
+            name="Medium (3-10min)", marker_color=FP_COLOR,
+        ))
+        fig_dwell.add_trace(go.Bar(
+            x=ds["date"].astype(str), y=ds["long_dwell_count"],
+            name="Long (10min+)", marker_color=VISITOR_COLOR,
+        ))
+        layout = make_plotly_layout("Dwell Breakdown", height=380)
+        layout["barmode"] = "stack"
+        fig_dwell.update_layout(**layout)
+        st.plotly_chart(fig_dwell, use_container_width=True)
+
+    # -- Day Type / Weather Pattern --
+    if "day_type" in ds.columns:
+        render_section_header("Weekday vs Weekend Pattern")
+        dt_summary = ds.groupby("day_type").agg(
+            Avg_FP=("floating_unique", "mean"),
+            Avg_Visitors=("visitor_count", "mean"),
+            Avg_CVR=(qc, "mean"),
+            Days=("date", "count"),
+        ).round(1).reset_index()
+        dt_summary = dt_summary.rename(columns={"day_type": "Day Type"})
+        st.dataframe(dt_summary, use_container_width=True, hide_index=True)
+
+    if "weather" in ds.columns:
+        render_section_header("Weather Impact")
+        w_summary = ds.groupby("weather").agg(
+            Avg_FP=("floating_unique", "mean"),
+            Avg_Visitors=("visitor_count", "mean"),
+            Avg_CVR=(qc, "mean"),
+            Days=("date", "count"),
+        ).round(1).reset_index()
+        w_summary = w_summary.rename(columns={"weather": "Weather"})
+        st.dataframe(w_summary, use_container_width=True, hide_index=True)
+
+    # -- AI Comparison --
+    st.markdown("---")
+    render_section_header("AI Comparison Analysis")
+    st.caption("AI analyzes traffic trends across the entire period.")
+
+    if not has_api_key():
+        st.info("Set ANTHROPIC_API_KEY to enable AI.")
+        return
+
+    col_btn2, col_lang2 = st.columns([3, 1])
+    with col_lang2:
+        ai_lang2 = st.selectbox("Language", ["English", "한국어"], key="comparison_ai_lang", label_visibility="collapsed")
+    with col_btn2:
+        if st.button("Generate Period Analysis", type="primary", use_container_width=True, key="comparison_ai_btn"):
+            _run_comparison_ai(space_name, ds, loader, time_range, lang=ai_lang2)
+
+    # -- Daily Detail Table (at bottom, collapsed) --
+    st.markdown("---")
+    with st.expander("Daily Detail Table", expanded=False):
+        summary_df = ds[["date", "floating_unique", "visitor_count", qc, dwell_col]].copy()
+        summary_df = summary_df.rename(columns={
+            "date": "Date",
+            "floating_unique": "FP",
+            "visitor_count": "Visitors",
+            qc: "CVR (%)",
+            dwell_col: "Dwell (sec)",
+        })
+        if "Dwell (sec)" in summary_df.columns:
+            summary_df["Dwell (min)"] = (summary_df["Dwell (sec)"] / 60).round(1)
+            summary_df = summary_df.drop(columns=["Dwell (sec)"])
+        if "CVR (%)" in summary_df.columns:
+            summary_df["CVR (%)"] = summary_df["CVR (%)"].round(1)
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+
+def _run_comparison_ai(
+    space_name: str,
+    ds: pd.DataFrame,
+    loader: CacheLoader,
+    time_range: tuple[int, int],
+    lang: str = "English",
+) -> None:
+    """Run AI analysis for comparison mode."""
+
+    has_quality = "quality_cvr" in ds.columns
+    qc = "quality_cvr" if has_quality else "conversion_rate"
+    dwell_col = "dwell_median_seconds" if "dwell_median_seconds" in ds.columns else "dwell_seconds_mean"
+
+    metrics = {
+        "space_name": space_name,
+        "n_days": len(ds),
+        "date_range": f"{ds['date'].min()} ~ {ds['date'].max()}",
+        "avg_fp": float(ds["floating_unique"].mean()),
+        "avg_visitors": float(ds["visitor_count"].mean()),
+        "avg_cvr": float(ds[qc].mean()),
+        "avg_dwell_sec": float(ds[dwell_col].mean()),
+        "total_fp": int(ds["floating_unique"].sum()),
+        "total_visitors": int(ds["visitor_count"].sum()),
+    }
+
+    # Best / worst days
+    best_day = ds.loc[ds["visitor_count"].idxmax()]
+    worst_day = ds.loc[ds["visitor_count"].idxmin()]
+    metrics["best_day"] = {"date": str(best_day["date"]), "visitors": int(best_day["visitor_count"])}
+    metrics["worst_day"] = {"date": str(worst_day["date"]), "visitors": int(worst_day["visitor_count"])}
+
+    # Day type breakdown
+    if "day_type" in ds.columns:
+        dt_agg = ds.groupby("day_type")[qc].mean().to_dict()
+        metrics["day_type_cvr"] = {str(k): round(v, 1) for k, v in dt_agg.items()}
+
+    # Weather breakdown (CVR + temperature + precipitation per weather type)
+    if "weather" in ds.columns:
+        w_agg = ds.groupby("weather")[qc].mean().to_dict()
+        metrics["weather_cvr"] = {str(k): round(v, 1) for k, v in w_agg.items()}
+        # Avg visitors by weather
+        w_visitors = ds.groupby("weather")["visitor_count"].mean().to_dict()
+        metrics["weather_visitors"] = {str(k): round(v, 0) for k, v in w_visitors.items()}
+
+    # Temperature & precipitation summary
+    if "temp_max" in ds.columns:
+        metrics["temp_range"] = f"{ds['temp_min'].min():.1f}°C ~ {ds['temp_max'].max():.1f}°C"
+        metrics["avg_temp"] = f"{((ds['temp_max'] + ds['temp_min']) / 2).mean():.1f}°C"
+    if "precipitation" in ds.columns:
+        rainy_days = int((ds["precipitation"] > 0).sum())
+        metrics["rainy_days"] = rainy_days
+        metrics["total_precipitation"] = round(float(ds["precipitation"].sum()), 1)
+
+    space_notes = st.session_state.get("current_space_notes", "")
+    with st.spinner("AI is analyzing period data..."):
+        result = _cached_ai_comparison(json.dumps(metrics, default=str), space_notes=space_notes, lang=lang)
+
+    if result and not result.startswith("\u26a0\ufe0f"):
+        _render_ai_sections(result, ["PERFORMANCE", "PATTERNS", "STRATEGY"])
+    else:
+        st.warning(result if result else "AI analysis failed.")
+
+
+# -- Device Mix Helpers ----------------------------------------------------
+
+IPHONE_COLOR = "#007AFF"
+ANDROID_COLOR = "#3DDC84"
+
+_DEVICE_LABELS = {1: "iPhone", 10: "Android"}
+
+
+def _render_device_mix_daily(loader: CacheLoader, date_str: str) -> None:
+    """Render iPhone vs Android donut chart + metrics for a single date."""
+    device_mix = loader.get_device_mix()
+    if device_mix.empty:
+        return
+
+    day_mix = device_mix[device_mix["date"].astype(str) == date_str]
+    if day_mix.empty:
+        return
+
+    iphone_count = int(day_mix.loc[day_mix["device_type"] == 1, "count"].sum())
+    android_count = int(day_mix.loc[day_mix["device_type"] == 10, "count"].sum())
+    total_dev = iphone_count + android_count
+    if total_dev == 0:
+        return
+
+    render_section_header("Device Mix (iPhone vs Android)")
+
+    col_chart, col_metrics = st.columns([2, 1])
+
+    with col_chart:
+        fig = go.Figure()
+        fig.add_trace(go.Pie(
+            labels=["iPhone", "Android"],
+            values=[iphone_count, android_count],
+            marker=dict(colors=[IPHONE_COLOR, ANDROID_COLOR]),
+            textinfo="label+percent",
+            textfont=dict(size=13),
+            hole=0.45,
+        ))
+        layout = make_plotly_layout("", height=300)
+        layout.pop("xaxis", None)
+        layout.pop("yaxis", None)
+        fig.update_layout(**layout)
+        fig.update_layout(
+            annotations=[dict(
+                text=f"{total_dev:,}",
+                x=0.5, y=0.5, font_size=20, font_color="#ccd6f6",
+                showarrow=False,
+            )],
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_metrics:
+        iphone_pct = iphone_count / total_dev * 100
+        android_pct = android_count / total_dev * 100
+        render_metric_card("iPhone", f"{iphone_count:,}", f"{iphone_pct:.1f}%")
+        render_metric_card("Android", f"{android_count:,}", f"{android_pct:.1f}%")
+        render_metric_card("Total Devices", f"{total_dev:,}", "Visitors detected")
+
+
+def _render_device_mix_comparison(loader: CacheLoader) -> None:
+    """Render iPhone vs Android ratio trend line chart for period comparison."""
+    device_mix = loader.get_device_mix()
+    if device_mix.empty:
+        return
+
+    # Pivot: date x device_type -> count
+    pivot = device_mix.pivot_table(
+        index="date", columns="device_type", values="count", fill_value=0,
+    ).reset_index()
+
+    iphone_col = 1 if 1 in pivot.columns else None
+    android_col = 10 if 10 in pivot.columns else None
+    if iphone_col is None and android_col is None:
+        return
+
+    pivot["iphone"] = pivot.get(iphone_col, 0)
+    pivot["android"] = pivot.get(android_col, 0)
+    pivot["total"] = pivot["iphone"] + pivot["android"]
+    pivot["iphone_pct"] = (pivot["iphone"] / pivot["total"].replace(0, 1) * 100).round(1)
+    pivot["android_pct"] = (pivot["android"] / pivot["total"].replace(0, 1) * 100).round(1)
+    pivot = pivot.sort_values("date")
+
+    render_section_header("Device Mix Trend")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pivot["date"].astype(str),
+        y=pivot["iphone_pct"],
+        name="iPhone %",
+        line=dict(color=IPHONE_COLOR, width=2),
+        mode="lines+markers",
+    ))
+    fig.add_trace(go.Scatter(
+        x=pivot["date"].astype(str),
+        y=pivot["android_pct"],
+        name="Android %",
+        line=dict(color=ANDROID_COLOR, width=2),
+        mode="lines+markers",
+    ))
+    layout = make_plotly_layout("iPhone vs Android Ratio (%)", height=320)
+    layout["yaxis"]["range"] = [0, 100]
+    fig.update_layout(**layout)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# -- AI Prompt Builders ----------------------------------------------------
+
+def _get_sector_behavior_context(space_name: str) -> str:
+    """Return sector-specific behavioral patterns for AI prompts."""
+    meta = REGISTERED_SECTORS.get(space_name, {})
+    stype = meta.get("store_type", "retail")
+    if stype == "convenience_store":
+        return (
+            "[Sector Behavior Patterns]\n"
+            "- Convenience store: commute-hour peaks (07-09h, 18-20h), lunch rush (12-13h)\n"
+            "- Late-night demand (22-02h) is a key differentiator\n"
+            "- Weather drives impulse purchases (rain = umbrella/hot drinks, cold = warm food)\n"
+            "- Weekday > Weekend for office-area CVS\n"
+            "- Short dwell (<3min) is normal; medium dwell signals browsing/meal purchase"
+        )
+    elif stype == "sports_retail":
+        return (
+            "[Sector Behavior Patterns]\n"
+            "- Sports retail in mall: Weekend >> Weekday traffic\n"
+            "- Seasonal peaks: sports season openings, back-to-school, year-end sales\n"
+            "- Mall events strongly correlate with foot traffic spikes\n"
+            "- Long dwell (10min+) signals serious purchase intent\n"
+            "- Medium dwell (3-10min) = browsing, good for upselling opportunities"
+        )
+    return ""
+
+
+def _build_daily_ai_prompt(metrics: dict) -> str:
+    """Build user prompt for daily AI analysis with 3-section structure."""
+    dwell_min = metrics.get("dwell_sec", 0) / 60
+    space_name = metrics.get("space_name", "Unknown")
+
+    lines = [
+        _get_sector_context(space_name),
+        _get_sector_behavior_context(space_name),
+        f"[Date: {metrics.get('date', 'N/A')}]",
+        "",
+        "[Today's Metrics]",
+        f"- Floating Population (passersby): {metrics.get('fp', 0):,}",
+        f"- Visitors (entered store): {metrics.get('visitors', 0):,}",
+        f"- CVR (conversion rate): {metrics.get('cvr', 0):.1f}%",
+        f"- Dwell Time (median): {dwell_min:.1f} min",
+    ]
+
+    if "short_pct" in metrics:
+        lines.extend([
+            "",
+            "[Dwell Breakdown]",
+            f"- Short (<3min): {metrics['short_pct']:.1f}%",
+            f"- Medium (3-10min): {metrics['medium_pct']:.1f}%",
+            f"- Long (10min+): {metrics['long_pct']:.1f}%",
+        ])
+
+    # Recent 14-day history for comparison context
+    recent_days = metrics.get("recent_14_days", [])
+    if recent_days:
+        lines.extend(["", "[Recent History — compare today against these]"])
+        lines.append("Date       | DayType  | Weather | Temp       | FP     | Visitors | CVR   | Dwell")
+        lines.append("---------- | -------- | ------- | ---------- | ------ | -------- | ----- | -----")
+        for d in recent_days:
+            today_marker = " ← TODAY" if d["date"] == metrics.get("date") else ""
+            lines.append(
+                f"{d['date']} | {d.get('day_type', ''):8s} | {d.get('weather', ''):7s} | "
+                f"{d.get('temp', ''):10s} | {d['fp']:6,} | {d['visitors']:8,} | "
+                f"{d['cvr']:5.1f}% | {d['dwell_min']:.1f}m{today_marker}"
+            )
+    if "period_avg_fp" in metrics:
+        lines.extend([
+            "",
+            f"[14-Day Average] FP: {metrics['period_avg_fp']:.0f}, "
+            f"Visitors: {metrics['period_avg_v']:.0f}, "
+            f"CVR: {metrics['period_avg_cvr']:.1f}%",
+        ])
+
+    # Day type + Weather context (important factor for traffic analysis)
+    context_lines = []
+    if "day_type" in metrics:
+        context_lines.append(f"- Day Type: {metrics['day_type']}")
+    if "weather" in metrics:
+        weather_str = metrics["weather"]
+        if "temp_max" in metrics and "temp_min" in metrics:
+            weather_str += f", High {metrics['temp_max']:.1f}°C / Low {metrics['temp_min']:.1f}°C"
+        if "precipitation" in metrics and metrics["precipitation"] > 0:
+            weather_str += f", Precipitation {metrics['precipitation']:.1f}mm"
+        context_lines.append(f"- Weather: {weather_str}")
+    if context_lines:
+        lines.extend(["", "[Context — Day & Weather]"] + context_lines)
+
+    space_notes = st.session_state.get("current_space_notes", "")
+    if space_notes:
+        lines.append(f"\n[Space Notes: {space_notes}]")
+
+    lines.extend([
+        "",
+        "Respond in EXACTLY 3 labeled sections (use these labels as-is):",
+        "",
+        "PERFORMANCE:",
+        "Compare today vs the recent 14-day history table above. "
+        "Explain WHY today is higher/lower than similar days (same day-type, same weather). "
+        "Reference specific dates from the table for comparison. 2-3 sentences.",
+        "",
+        "BEHAVIOR:",
+        "Analyze dwell quality (short vs medium vs long ratio). "
+        "What does the dwell pattern reveal about customer engagement? "
+        "Note any time-of-day or day-type effects. 2-3 sentences.",
+        "",
+        "RECOMMENDATIONS:",
+        "Provide 3 specific, actionable recommendations. Each must be one of:",
+        "- Advertising/promotion timing (when to run promos based on traffic patterns)",
+        "- Location value (how efficiently the store converts passersby to visitors)",
+        "- Store operations (staffing, display changes, inventory based on dwell patterns)",
+        "",
+        "Total: under 200 words. English only. Use numbers.",
+    ])
+
+    return "\n".join(lines)
+
+
+def _build_comparison_ai_prompt(metrics: dict) -> str:
+    """Build user prompt for comparison AI analysis with 3-section structure."""
+    space_name = metrics.get("space_name", "Unknown")
+    lines = [
+        _get_sector_context(space_name),
+        _get_sector_behavior_context(space_name),
+        f"[Period: {metrics.get('date_range', 'N/A')} ({metrics.get('n_days', 0)} days)]",
+        "",
+        "[Period Averages]",
+        f"- Avg Daily FP: {metrics.get('avg_fp', 0):.0f}",
+        f"- Avg Daily Visitors: {metrics.get('avg_visitors', 0):.0f}",
+        f"- Avg CVR: {metrics.get('avg_cvr', 0):.1f}%",
+        f"- Avg Dwell: {metrics.get('avg_dwell_sec', 0) / 60:.1f} min",
+        f"- Total FP: {metrics.get('total_fp', 0):,}",
+        f"- Total Visitors: {metrics.get('total_visitors', 0):,}",
+    ]
+
+    best = metrics.get("best_day", {})
+    worst = metrics.get("worst_day", {})
+    if best:
+        lines.append(f"- Best Day: {best.get('date')} ({best.get('visitors')} visitors)")
+    if worst:
+        lines.append(f"- Worst Day: {worst.get('date')} ({worst.get('visitors')} visitors)")
+
+    if "day_type_cvr" in metrics:
+        lines.append("")
+        lines.append("[CVR by Day Type]")
+        for dt, cvr in metrics["day_type_cvr"].items():
+            lines.append(f"  - {dt}: {cvr}%")
+
+    if "weather_cvr" in metrics:
+        lines.append("")
+        lines.append("[Weather Impact on CVR & Traffic]")
+        for w, cvr in metrics["weather_cvr"].items():
+            avg_v = metrics.get("weather_visitors", {}).get(w, "N/A")
+            lines.append(f"  - {w}: CVR {cvr}%, Avg Visitors {avg_v}")
+    if "temp_range" in metrics:
+        lines.append(f"  - Temperature range: {metrics['temp_range']}")
+        lines.append(f"  - Avg temperature: {metrics['avg_temp']}")
+    if "rainy_days" in metrics:
+        lines.append(f"  - Rainy/snowy days: {metrics['rainy_days']} of {metrics.get('n_days', 0)}")
+        lines.append(f"  - Total precipitation: {metrics.get('total_precipitation', 0)}mm")
+
+    lines.extend([
+        "",
+        "Respond in EXACTLY 3 labeled sections (use these labels as-is):",
+        "",
+        "PERFORMANCE:",
+        "Summarize the period: overall trend direction, best/worst days, "
+        "and the most notable metric changes. Use specific numbers. 2-3 sentences.",
+        "",
+        "PATTERNS:",
+        "Analyze weekday vs weekend differences, weather impact on traffic/CVR, "
+        "and any recurring patterns (e.g., certain days consistently outperform). "
+        "2-3 sentences with numbers.",
+        "",
+        "STRATEGY:",
+        "Provide 3 specific, actionable recommendations:",
+        "- Promotion timing (which days/hours to invest in advertising based on the data)",
+        "- Location value assessment (is the store efficiently converting its foot traffic?)",
+        "- Operations optimization (staffing, display changes, or inventory timing for next period)",
+        "",
+        "Total: under 250 words. English only. Use numbers.",
+    ])
+
+    return "\n".join(lines)

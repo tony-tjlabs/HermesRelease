@@ -191,6 +191,100 @@ def _compute_30min_stats(
     return pd.DataFrame(rows)
 
 
+def _compute_nmin_stats(
+    sessions: pd.DataFrame,
+    daily_timeseries: pd.DataFrame,
+    date_str: str,
+    bin_minutes: int = 5,
+) -> pd.DataFrame:
+    """
+    Compute N-minute-binned stats for a single date.
+
+    Parameters
+    ----------
+    bin_minutes : any divisor of 60 (5, 10, 15, 20, 30)
+
+    Returns DataFrame with (24*60/bin_minutes) rows.
+    """
+    n_bins = 24 * 60 // bin_minutes
+    bins = list(range(n_bins))
+    bin_labels = [
+        f"{(b * bin_minutes) // 60:02d}:{(b * bin_minutes) % 60:02d}"
+        for b in bins
+    ]
+
+    # ── Floating Population from timeseries (minute-level) ─────────────────
+    fp_by_bin = {b: 0 for b in bins}
+    ts_day = (
+        daily_timeseries[daily_timeseries["date"] == date_str]
+        if not daily_timeseries.empty and "date" in daily_timeseries.columns
+        else pd.DataFrame()
+    )
+    if not ts_day.empty and "minute" in ts_day.columns and "floating_count" in ts_day.columns:
+        ts_day = ts_day.copy()
+        ts_day["bin_n"] = ts_day["minute"] // bin_minutes
+        fp_agg = ts_day.groupby("bin_n")["floating_count"].max()
+        for b_idx, val in fp_agg.items():
+            if 0 <= b_idx < n_bins:
+                fp_by_bin[int(b_idx)] = int(val)
+
+    # ── Visitors, dwell, device from sessions ──────────────────────────────
+    v_by_bin = {b: 0 for b in bins}
+    dwell_by_bin = {b: 0.0 for b in bins}
+    ios_by_bin = {b: 0 for b in bins}
+    android_by_bin = {b: 0 for b in bins}
+
+    sess_day = (
+        sessions[sessions["date"] == date_str]
+        if not sessions.empty and "date" in sessions.columns
+        else pd.DataFrame()
+    )
+    if not sess_day.empty and "entry_time_index" in sess_day.columns:
+        sess_day = sess_day.copy()
+        sess_day["bin_n"] = (
+            sess_day["entry_time_index"] * TIME_UNIT_SECONDS // 60 // bin_minutes
+        ).astype(int).clip(0, n_bins - 1)
+
+        v_counts = sess_day.groupby("bin_n").size()
+        for b_idx, cnt in v_counts.items():
+            if 0 <= b_idx < n_bins:
+                v_by_bin[int(b_idx)] = int(cnt)
+
+        if "dwell_seconds" in sess_day.columns:
+            dwell_means = sess_day.groupby("bin_n")["dwell_seconds"].mean()
+            for b_idx, val in dwell_means.items():
+                if 0 <= b_idx < n_bins:
+                    dwell_by_bin[int(b_idx)] = float(val)
+
+        if "device_type" in sess_day.columns:
+            dev_counts = sess_day.groupby(["bin_n", "device_type"]).size().unstack(fill_value=0)
+            for b_idx in dev_counts.index:
+                if 0 <= b_idx < n_bins:
+                    apple = int(dev_counts.at[b_idx, DEVICE_TYPE_APPLE]) if DEVICE_TYPE_APPLE in dev_counts.columns else 0
+                    android = int(dev_counts.at[b_idx, DEVICE_TYPE_ANDROID]) if DEVICE_TYPE_ANDROID in dev_counts.columns else 0
+                    ios_by_bin[int(b_idx)] = apple
+                    android_by_bin[int(b_idx)] = android
+
+    # ── Assemble ───────────────────────────────────────────────────────────
+    rows = []
+    for b in bins:
+        fp = fp_by_bin[b]
+        v = v_by_bin[b]
+        cvr = round(v / fp * 100, 1) if fp > 0 else 0.0
+        total_dev = ios_by_bin[b] + android_by_bin[b]
+        rows.append({
+            "bin_label": bin_labels[b],
+            "bin_idx": b,
+            "floating_count": fp,
+            "visitor_count": v,
+            "cvr_pct": cvr,
+            "dwell_sec_mean": round(dwell_by_bin[b], 1),
+            "ios_pct": round(100 * ios_by_bin[b] / total_dev, 1) if total_dev else 0.0,
+            "android_pct": round(100 * android_by_bin[b] / total_dev, 1) if total_dev else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
 def hourly_stats_flexible(
     daily_hourly: pd.DataFrame,
     sessions: pd.DataFrame,
@@ -205,9 +299,9 @@ def hourly_stats_flexible(
     ----------
     daily_hourly : Cached hourly data (used for 60-min bins)
     sessions : Session-level data (used for all bin sizes)
-    daily_timeseries : Minute-level timeseries (used for 30-min FP)
+    daily_timeseries : Minute-level timeseries (used for sub-hour bins)
     dates : List of date strings ('YYYY-MM-DD')
-    bin_minutes : 30 or 60
+    bin_minutes : 5, 10, 15, 30, or 60
 
     Returns
     -------
@@ -219,13 +313,16 @@ def hourly_stats_flexible(
 
     frames = []
     for date_str in dates:
-        if bin_minutes == 30:
-            df = _compute_30min_stats(sessions, daily_timeseries, date_str)
-        else:
+        if bin_minutes == 60:
             # 60min: reuse existing function, add bin_label
             df = hourly_stats_for_date(daily_hourly, sessions, date_str)
             df["bin_label"] = df["hour"].apply(lambda h: f"{h:02d}:00")
             df["bin_idx"] = df["hour"]
+        elif bin_minutes == 30:
+            df = _compute_30min_stats(sessions, daily_timeseries, date_str)
+        else:
+            # 5, 10, 15, 20 min bins
+            df = _compute_nmin_stats(sessions, daily_timeseries, date_str, bin_minutes)
         frames.append(df)
 
     if not frames:
@@ -252,10 +349,14 @@ def hourly_stats_flexible(
     avg_df.loc[avg_df["floating_count"] == 0, "cvr_pct"] = 0.0
 
     # Add bin_label
-    if bin_minutes == 30:
+    if bin_minutes == 60:
+        avg_df["bin_label"] = avg_df["bin_idx"].apply(lambda h: f"{int(h):02d}:00")
+    elif bin_minutes == 30:
         avg_df["bin_label"] = avg_df["bin_idx"].apply(lambda b: f"{b // 2:02d}:{(b % 2) * 30:02d}")
     else:
-        avg_df["bin_label"] = avg_df["bin_idx"].apply(lambda h: f"{int(h):02d}:00")
+        avg_df["bin_label"] = avg_df["bin_idx"].apply(
+            lambda b: f"{(b * bin_minutes) // 60:02d}:{(b * bin_minutes) % 60:02d}"
+        )
 
     return avg_df.sort_values("bin_idx").reset_index(drop=True)
 

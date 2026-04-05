@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from src.data.space_loader import load_sward_config, load_raw_date, get_available_dates
+from src.data.space_loader import load_sward_config, load_raw_date, get_available_dates, load_store_config, StoreConfig
 from src.data.external_api import enrich_external
 from src.analytics.day_type import add_day_context_to_daily_stats
 from src.analytics.ble_engine import HermesBLEEngine
@@ -34,14 +34,32 @@ from src.config.constants import (
     STORE_OPEN_HOUR,
     STORE_CLOSE_HOUR,
 )
+from src.analytics.android_correction import (
+    calibrate_th_and,
+    correct_hourly_floating,
+    correct_daily_floating,
+    CorrectionCalibration,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _compute_dwell_funnel(sessions_df: pd.DataFrame, floating_unique: int) -> dict:
+def _compute_dwell_funnel(
+    sessions_df: pd.DataFrame,
+    floating_unique: int,
+    dwell_short_max: int = DWELL_SHORT_MAX,
+    dwell_medium_max: int = DWELL_MEDIUM_MAX,
+) -> dict:
     """
     세션 dwell_seconds 기준으로 퍼널 집계.
-    단기(<3분), 중기(3~10분), 장기(10분+), quality_visitor, quality_cvr, dwell_median.
+    단기(<dwell_short_max), 중기(short~medium), 장기(medium+), quality_visitor, quality_cvr, dwell_median.
+
+    Parameters
+    ----------
+    dwell_short_max : int
+        단기 체류 상한 (초). 기본값 DWELL_SHORT_MAX (180초, 3분)
+    dwell_medium_max : int
+        중기 체류 상한 (초). 기본값 DWELL_MEDIUM_MAX (600초, 10분)
     """
     if sessions_df.empty or "dwell_seconds" not in sessions_df.columns:
         return {
@@ -57,9 +75,9 @@ def _compute_dwell_funnel(sessions_df: pd.DataFrame, floating_unique: int) -> di
         }
     dwell = sessions_df["dwell_seconds"]
     n = len(dwell)
-    short = int((dwell < DWELL_SHORT_MAX).sum())
-    medium = int(((dwell >= DWELL_SHORT_MAX) & (dwell < DWELL_MEDIUM_MAX)).sum())
-    long_ = int((dwell >= DWELL_MEDIUM_MAX).sum())
+    short = int((dwell < dwell_short_max).sum())
+    medium = int(((dwell >= dwell_short_max) & (dwell < dwell_medium_max)).sum())
+    long_ = int((dwell >= dwell_medium_max).sum())
     quality = medium + long_
     return {
         "short_dwell_count": short,
@@ -113,13 +131,15 @@ def _build_daily_stats_row(
     date_str: str,
     floating_unique: int,
     sessions_df: pd.DataFrame,
+    dwell_short_max: int = DWELL_SHORT_MAX,
+    dwell_medium_max: int = DWELL_MEDIUM_MAX,
 ) -> dict:
     """Build a daily_stats row from a sessions DataFrame."""
     date_obj = pd.to_datetime(date_str)
     visitor_count = len(sessions_df) if not sessions_df.empty else 0
     dwell_mean = float(sessions_df["dwell_seconds"].mean()) if not sessions_df.empty else 0.0
     cvr = (visitor_count / floating_unique * 100.0) if floating_unique > 0 else 0.0
-    funnel = _compute_dwell_funnel(sessions_df, floating_unique)
+    funnel = _compute_dwell_funnel(sessions_df, floating_unique, dwell_short_max, dwell_medium_max)
     return {
         "date": date_str,
         "floating_unique": floating_unique,
@@ -163,7 +183,7 @@ def _build_hourly_rows(
         fp = fb["floating_count"]
         vc = vm["visitor_count"]
         cvr_h = (vc / fp * 100.0) if fp > 0 else 0.0
-        rows.append({
+        row = {
             "date": date_str,
             "hour": h,
             "floating_count": fp,
@@ -174,7 +194,14 @@ def _build_hourly_rows(
             "floating_android": fb["floating_android"],
             "visitor_apple": vm["visitor_apple"],
             "visitor_android": vm["visitor_android"],
-        })
+        }
+        # Android FP correction columns (if available)
+        if "floating_count_corrected" in fb:
+            fp_corr = fb["floating_count_corrected"]
+            row["floating_count_corrected"] = fp_corr
+            row["floating_android_corrected"] = fb.get("floating_android_corrected", fb["floating_android"])
+            row["missing_android"] = fb.get("missing_android", 0)
+        rows.append(row)
     return rows
 
 
@@ -197,7 +224,13 @@ def run_preprocess_space(
     date_range: Optional[List[str]] = None,
     force: bool = False,
     max_dates: Optional[int] = None,
+    on_progress=None,
 ) -> bool:
+    """
+    on_progress: Optional[Callable[[int, int, str], None]]
+        호출 시그니처: on_progress(current_idx, total, date_str)
+        날짜별 처리 시작 시점에 호출된다.
+    """
     """
     Run full pipeline for one space: load raw → BLE engine → MAC Stitching → aggregates.
 
@@ -223,6 +256,12 @@ def run_preprocess_space(
     try:
         logger.info("Loading sward config for %s", space_name)
         sward_config = load_sward_config(space_name)
+        store_config = load_store_config(space_name)
+        logger.info(
+            "Store config: open=%d, close=%d, min_hits=%d, dwell_short=%d, dwell_medium=%d",
+            store_config.store_open_hour, store_config.store_close_hour,
+            store_config.min_hits_per_min, store_config.dwell_short_max, store_config.dwell_medium_max,
+        )
         dates = date_range or get_available_dates(space_name)
         if not dates:
             logger.warning("No dates found for %s", space_name)
@@ -231,8 +270,41 @@ def run_preprocess_space(
             dates = dates[:max_dates]
         logger.info("Processing %d dates for %s", len(dates), space_name)
 
-        engine = HermesBLEEngine(sward_config)
+        # HermesBLEEngine: Sector별 운영 파라미터 전달
+        engine = HermesBLEEngine(
+            sward_config,
+            store_open_hour=store_config.store_open_hour,
+            store_close_hour=store_config.store_close_hour,
+            min_hits_per_min=store_config.min_hits_per_min,
+            min_dwell_seconds=store_config.min_dwell_seconds,
+            rssi_pass_ratio=store_config.rssi_pass_ratio,
+        )
         writer = CacheWriter(space_name)
+
+        # ── Android FP Correction: 캘리브레이션 (1회) ───────────────────
+        calibration: Optional[CorrectionCalibration] = None
+        calibration_dates = dates[:min(7, len(dates))]
+        calibration_dfs = []
+        for cd in calibration_dates:
+            try:
+                calibration_dfs.append(load_raw_date(space_name, cd))
+            except Exception:
+                continue
+        if calibration_dfs:
+            calibration_df = pd.concat(calibration_dfs, ignore_index=True)
+            calibration = calibrate_th_and(
+                calibration_df,
+                engine.entrance_swards,
+                engine.inside_swards,
+                engine.floating_rssi,
+            )
+            logger.info(
+                "Android FP correction: Th_and=%d, diff=%.2f%%, mix_ratio=%.3f, needed=%s",
+                calibration.th_and, calibration.self_consistency_diff,
+                calibration.mix_ratio_global, calibration.correction_needed,
+            )
+        else:
+            logger.info("Android FP correction: no calibration data available")
 
         # PRIMARY accumulators (stitched-based)
         daily_results: List[dict] = []
@@ -251,6 +323,8 @@ def run_preprocess_space(
 
         for idx, date_str in enumerate(dates):
             logger.info("  [%d/%d] %s", idx + 1, len(dates), date_str)
+            if on_progress:
+                on_progress(idx, len(dates), date_str)
             df = load_raw_date(space_name, date_str)
             if df.empty:
                 logger.warning("    Empty raw data, skip")
@@ -287,17 +361,59 @@ def run_preprocess_space(
                     "floating_android": int((h_mac["type"] == DEVICE_TYPE_ANDROID).sum()),
                 }
 
+            # ── Phase B-2: Android FP Correction ───────────────────────────
+            if calibration is not None and calibration.correction_needed:
+                hourly_corr = correct_hourly_floating(
+                    df, engine.entrance_swards, engine.inside_swards,
+                    engine.floating_rssi, calibration,
+                )
+                daily_corr = correct_daily_floating(
+                    hourly_corr, out["floating_unique"],
+                    store_open_hour=store_config.store_open_hour,
+                    store_close_hour=store_config.store_close_hour,
+                )
+                corrected_floating_unique = daily_corr["floating_unique_corrected"]
+                fp_correction_applied = daily_corr["correction_applied"]
+                fp_correction_pct = daily_corr["correction_pct"]
+                # floating_base에 보정 컬럼 추가
+                for h in range(24):
+                    hc = hourly_corr.get(h, {})
+                    floating_base[h]["floating_count_corrected"] = hc.get("floating_count_corrected", floating_base[h]["floating_count"])
+                    floating_base[h]["floating_android_corrected"] = hc.get("floating_android_corrected", floating_base[h]["floating_android"])
+                    floating_base[h]["missing_android"] = hc.get("missing_android", 0)
+                if fp_correction_applied:
+                    logger.info("    FP correction: %d → %d (+%.1f%%)",
+                                out["floating_unique"], corrected_floating_unique, fp_correction_pct)
+            else:
+                corrected_floating_unique = out["floating_unique"]
+                fp_correction_applied = False
+                fp_correction_pct = 0.0
+                for h in range(24):
+                    floating_base[h]["floating_count_corrected"] = floating_base[h]["floating_count"]
+                    floating_base[h]["floating_android_corrected"] = floating_base[h]["floating_android"]
+                    floating_base[h]["missing_android"] = 0
+
             # ── Phase C: Collect RAW aggregates (for comparison) ──────────
-            # 운영 시간(10:00–22:00) 세션만 집계에 사용 — 영업 외 시간 방문은 CVR 분자에서 제외
-            sessions_raw_ops = (
-                sessions_df[sessions_df["hour"].between(STORE_OPEN_HOUR, STORE_CLOSE_HOUR - 1)]
-                if not sessions_df.empty else sessions_df
-            )
+            # 운영 시간 세션만 집계에 사용 — 영업 외 시간 방문은 CVR 분자에서 제외
+            # 24시간 영업(open=0, close=24)이면 필터 안 함
+            if store_config.is_24h():
+                sessions_raw_ops = sessions_df
+            else:
+                sessions_raw_ops = (
+                    sessions_df[sessions_df["hour"].between(
+                        store_config.store_open_hour, store_config.store_close_hour - 1
+                    )]
+                    if not sessions_df.empty else sessions_df
+                )
             raw_daily_results.append(
                 _build_daily_result_row(date_str, out["floating_unique"], sessions_raw_ops)
             )
             raw_daily_stats_rows.append(
-                _build_daily_stats_row(date_str, out["floating_unique"], sessions_raw_ops)
+                _build_daily_stats_row(
+                    date_str, out["floating_unique"], sessions_raw_ops,
+                    dwell_short_max=store_config.dwell_short_max,
+                    dwell_medium_max=store_config.dwell_medium_max,
+                )
             )
             raw_visitor_metrics = _compute_hourly_visitor_metrics(sessions_raw_ops)
             raw_daily_hourly_rows.extend(
@@ -339,17 +455,33 @@ def run_preprocess_space(
                 ).astype(int).clip(0, 23)
 
             # ── Phase E: Compute PRIMARY aggregates (from stitched) ───────
-            # 운영 시간(10:00–22:00) 세션만 집계 — CVR 분자에 영업 외 세션 포함 방지
-            sessions_stitched_ops = (
-                sessions_df_stitched[sessions_df_stitched["hour"].between(STORE_OPEN_HOUR, STORE_CLOSE_HOUR - 1)]
-                if not sessions_df_stitched.empty else sessions_df_stitched
+            # 운영 시간 세션만 집계 — CVR 분자에 영업 외 세션 포함 방지
+            # 24시간 영업(open=0, close=24)이면 필터 안 함
+            if store_config.is_24h():
+                sessions_stitched_ops = sessions_df_stitched
+            else:
+                sessions_stitched_ops = (
+                    sessions_df_stitched[sessions_df_stitched["hour"].between(
+                        store_config.store_open_hour, store_config.store_close_hour - 1
+                    )]
+                    if not sessions_df_stitched.empty else sessions_df_stitched
+                )
+            # PRIMARY는 보정된 floating 사용
+            primary_result = _build_daily_result_row(date_str, corrected_floating_unique, sessions_stitched_ops)
+            primary_result["floating_unique_raw"] = out["floating_unique"]
+            primary_result["fp_correction_applied"] = fp_correction_applied
+            primary_result["fp_correction_pct"] = fp_correction_pct
+            daily_results.append(primary_result)
+
+            primary_stats = _build_daily_stats_row(
+                date_str, corrected_floating_unique, sessions_stitched_ops,
+                dwell_short_max=store_config.dwell_short_max,
+                dwell_medium_max=store_config.dwell_medium_max,
             )
-            daily_results.append(
-                _build_daily_result_row(date_str, out["floating_unique"], sessions_stitched_ops)
-            )
-            daily_stats_rows.append(
-                _build_daily_stats_row(date_str, out["floating_unique"], sessions_stitched_ops)
-            )
+            primary_stats["floating_unique_raw"] = out["floating_unique"]
+            primary_stats["fp_correction_applied"] = fp_correction_applied
+            primary_stats["fp_correction_pct"] = fp_correction_pct
+            daily_stats_rows.append(primary_stats)
             stitched_visitor_metrics = _compute_hourly_visitor_metrics(sessions_stitched_ops)
             daily_hourly_rows.extend(
                 _build_hourly_rows(date_str, floating_base, stitched_visitor_metrics)
@@ -415,6 +547,14 @@ def run_preprocess_space(
                 logger.info("Enriched %s daily_stats with external data.", label)
             except Exception as exc:
                 logger.warning("External enrichment failed for %s (non-fatal): %s", label, exc)
+
+        # ── Write correction calibration ─────────────────────────────────
+        if calibration is not None:
+            import json
+            cal_path = writer.cache_dir / "correction_calibration.json"
+            writer.cache_dir.mkdir(parents=True, exist_ok=True)
+            cal_path.write_text(json.dumps(calibration.to_dict(), indent=2))
+            logger.info("Saved correction calibration to %s", cal_path)
 
         # ── Write cache ───────────────────────────────────────────────────
         logger.info("Writing cache to %s", writer.cache_dir)

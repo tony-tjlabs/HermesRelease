@@ -61,3 +61,13 @@ STORE_CLOSE_HOUR = 22   # 오후 10시 (미포함, exclusive) → hour 10~21 유
 # 타임존
 TIMEZONE_STR = "Asia/Seoul"
 UTC_OFFSET = "+09:00"
+
+# ── Android FP Correction ────────────────────────────────────────
+# 강신호 구간 Mix Ratio 기반 Android 과소수집 보정
+# 보정 대상: Floating (유동인구)만. Visitor (방문자)는 보정 안 함.
+CORRECTION_TH_IPH = -65                # iPhone 강신호 경계 (고정, dBm)
+CORRECTION_TH_AND_MIN = -95            # Th_and 자동 탐색 하한 (dBm)
+CORRECTION_TH_AND_MAX = -66            # Th_and 자동 탐색 상한 (dBm)
+CORRECTION_SELF_CONSISTENCY_SKIP = 5.0  # diff > 5% → 보정 불필요 (이미 충분히 수집)
+CORRECTION_SELF_CONSISTENCY_OK = 2.0    # diff < 2% → 신뢰 보정
+CORRECTION_MIN_STRONG_COUNT = 3         # 시간대별 최소 강신호 MAC 수 (미만 시 global 폴백)

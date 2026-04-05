@@ -36,8 +36,8 @@ from src.config.constants import TIME_UNIT_SECONDS
 # NOTE: src.report (fpdf2) is imported lazily inside render_report_tab()
 # to avoid ImportError on environments where fpdf2 may not be installed.
 
-# Palette
-DEEP_NAVY = "#0f172a"
+# Palette (dark theme — DEEP_NAVY brightened for visibility on #0E1117 background)
+DEEP_NAVY = "#4A90D9"
 GOLD      = "#c49a3a"
 AMBER     = "#d97706"
 SLATE_GRAY = "#64748b"
@@ -1011,7 +1011,7 @@ Gold bars = Weekend (Sat/Sun). Navy bars = Weekday. Error bars = ±1 std dev.
 
         # ── Chart A: Avg FP + Visitors by weekday (grouped, with error bars) ──
         bar_colors_fp = [GOLD if r else DEEP_NAVY for r in wd_stats["is_weekend"]]
-        bar_colors_v  = ["#d4a21a" if r else "#334155" for r in wd_stats["is_weekend"]]
+        bar_colors_v  = ["#d4a21a" if r else "#64748b" for r in wd_stats["is_weekend"]]
 
         fig_wd_traf = go.Figure()
         fig_wd_traf.add_trace(go.Bar(
@@ -1294,7 +1294,7 @@ Use together with the charts above:
                 pivot_fp.index = [wd_en.get(i, str(i)) for i in pivot_fp.index]
                 fig_hm_fp = px.imshow(pivot_fp, labels=dict(x="Hour", y="Weekday", color="Floating Pop"),
                                       aspect="auto",
-                                      color_continuous_scale=["#f8fafc", AMBER, DEEP_NAVY])
+                                      color_continuous_scale=["#1a2035", AMBER, "#ccd6f6"])
                 fig_hm_fp.update_layout(height=400, title="Floating Pop — Weekday × Hour (avg)")
                 apply_theme(fig_hm_fp)
                 st.plotly_chart(fig_hm_fp, use_container_width=True)
@@ -1306,7 +1306,7 @@ Use together with the charts above:
                 pivot_cvr.index = [wd_en.get(i, str(i)) for i in pivot_cvr.index]
                 fig_hm_cvr = px.imshow(pivot_cvr, labels=dict(x="Hour", y="Weekday", color="CVR (%)"),
                                        aspect="auto",
-                                       color_continuous_scale=["#f8fafc", GOLD, DEEP_NAVY])
+                                       color_continuous_scale=["#1a2035", GOLD, "#ccd6f6"])
                 fig_hm_cvr.update_layout(height=400, title="CVR — Weekday × Hour (avg)")
                 apply_theme(fig_hm_cvr)
                 st.plotly_chart(fig_hm_cvr, use_container_width=True)
@@ -1706,7 +1706,7 @@ Medium-dominant = typical browsing; promotions tend to work.
         dist = _cached_dwell_dist(sessions_display)
         if not dist.empty:
             fig_dwell = px.bar(dist, x="segment", y="count", color="ratio",
-                               color_continuous_scale=["#f8fafc", GOLD, DEEP_NAVY])
+                               color_continuous_scale=["#1a2035", GOLD, "#ccd6f6"])
             fig_dwell.update_layout(height=320, xaxis_title="Segment",
                                     yaxis_title="Count", title="Dwell time distribution")
             apply_theme(fig_dwell)
@@ -2135,13 +2135,12 @@ def _build_dwell_funnel_chart(report_data: dict):
     fig.add_annotation(
         text=f"Quality<br>{medium + long_:.1f}%",
         x=0.5, y=0.5, showarrow=False,
-        font=dict(size=13, color=DEEP_NAVY, family="Helvetica"),
+        font=dict(size=13, color="#ccd6f6", family="Helvetica"),
     )
     fig.update_layout(
         height=280, margin=dict(l=20, r=20, t=20, b=20),
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=-0.2),
-        paper_bgcolor="#ffffff",
     )
     apply_theme(fig)
     return fig
@@ -2179,8 +2178,6 @@ def _build_prediction_chart(predictions: list, this_week_daily_avg: float):
     fig.update_layout(
         height=300,
         margin=dict(l=50, r=30, t=30, b=50),
-        plot_bgcolor="#f8f9fc",
-        paper_bgcolor="#ffffff",
         showlegend=False,
         yaxis_title="Floating Pop",
         font=dict(size=10),

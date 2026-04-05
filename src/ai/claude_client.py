@@ -17,9 +17,9 @@ from typing import Any, Dict, List, Optional
 
 _API_URL    = "https://api.anthropic.com/v1/messages"
 _MODEL      = "claude-haiku-4-5-20251001"   # 저비용 권장
-_MAX_TOKENS = 1024
-_REPORT_MAX_TOKENS = 1500
-_SYNTHESIS_MAX_TOKENS = 400
+_MAX_TOKENS = 2048
+_REPORT_MAX_TOKENS = 2500
+_SYNTHESIS_MAX_TOKENS = 800
 _TIMEOUT    = 30
 
 HERMES_CONTEXT = """
@@ -74,11 +74,24 @@ def _ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
+_LANG_SYSTEM = {
+    "English": (
+        "You MUST respond ONLY in English. Do not use Korean, Chinese, or other non-ASCII characters. "
+        "All analysis, headings, and recommendations must be in clear English."
+    ),
+    "한국어": (
+        "반드시 한국어로 응답하세요. 모든 분석, 제목, 권고 사항을 한국어로 작성하세요. "
+        "숫자와 지표명(FP, CVR 등)은 영어 약어를 유지하되, 설명은 한국어로 하세요."
+    ),
+}
+
+
 def call_claude(
     prompt: str,
     system: str = "",
     space_notes: str = "",
     max_tokens: Optional[int] = None,
+    lang: str = "English",
 ) -> str:
     """
     Send a prompt to Claude and return the text response.
@@ -91,7 +104,8 @@ def call_claude(
         Optional system prompt for role/context setting.
     space_notes : str
         Optional operator notes for the space (from sidebar Space Notes).
-        Injected into the system prompt so Claude can reference store-specific context.
+    lang : str
+        Response language: "English" or "한국어".
 
     Returns
     -------
@@ -105,21 +119,24 @@ def call_claude(
             "Set it in `.streamlit/secrets.toml` or in the ANTHROPIC_API_KEY environment variable to use AI features."
         )
 
+    # Append language instruction to the END of user prompt (most effective position)
+    lang_instr = _LANG_SYSTEM.get(lang, _LANG_SYSTEM["English"])
+    final_prompt = prompt.rstrip() + f"\n\n[IMPORTANT] {lang_instr}"
+
     payload: dict = {
         "model":      _MODEL,
         "max_tokens": max_tokens if max_tokens is not None else _MAX_TOKENS,
-        "messages":   [{"role": "user", "content": prompt}],
+        "messages":   [{"role": "user", "content": final_prompt}],
     }
-    # English-only first so PDF/render never get non-ASCII.
-    full_system = (
-        "You MUST respond ONLY in English. Do not use Korean, Chinese, or other non-ASCII characters. "
-        "All analysis, headings, and recommendations must be in clear English.\n\n"
-    )
-    full_system += HERMES_CONTEXT
+    # Build system prompt: context first, language instruction LAST (strongest position)
+    full_system = HERMES_CONTEXT
     if space_notes and space_notes.strip():
         full_system += "\n\n[Operator notes — for context]\n" + space_notes.strip()
     if system:
-        full_system = full_system + "\n\n" + system
+        full_system += "\n\n" + system
+    # Language instruction at the very end — model follows last instruction most reliably
+    lang_instr = _LANG_SYSTEM.get(lang, _LANG_SYSTEM["English"])
+    full_system += "\n\n[CRITICAL LANGUAGE RULE]\n" + lang_instr
     payload["system"] = full_system
 
     body = json.dumps(payload).encode("utf-8")
@@ -160,10 +177,11 @@ def generate_kpi_summary(
     prev_week: Dict[str, Any],
     context: Dict[str, Any],
     space_notes: str = "",
+    lang: str = "English",
 ) -> str:
     """Summarize the 4 KPIs in 1-2 sentences for store owners. max_tokens=100."""
     system = (
-        "You are a retail analyst. Respond in English only. "
+        "You are a retail analyst. "
         "Write exactly 2 sentences (max 50 words) summarizing the 4 KPIs "
         "in plain language for a store owner. Focus on the most important signal."
     )
@@ -173,9 +191,9 @@ def generate_kpi_summary(
         f"Quality CVR={this_week.get('quality_cvr', 0):.1f}% ({this_week.get('cvr_delta', 0):+.1f}%), "
         f"Median Dwell={this_week.get('dwell_median_str', 'N/A')} ({this_week.get('dwell_delta_str', '')}).\n"
         f"Context: {context.get('holiday_period', '')}, Season: {context.get('season', '')}.\n"
-        "IMPORTANT: English only. 2 sentences max."
+        "2 sentences max."
     )
-    return call_claude(user, system=system, space_notes=space_notes, max_tokens=100)
+    return call_claude(user, system=system, space_notes=space_notes, max_tokens=100, lang=lang)
 
 
 def generate_context_comment(
@@ -183,6 +201,7 @@ def generate_context_comment(
     holiday_info: Dict[str, Any],
     season: str,
     space_notes: str = "",
+    lang: str = "English",
 ) -> str:
     """Explain this week's business context (holiday/weather/season) in 2-3 sentences. max_tokens=120."""
     system = (
@@ -202,7 +221,7 @@ def generate_context_comment(
         "in a Korean shopping mall. Be practical and specific.\n"
         "IMPORTANT: English only."
     )
-    return call_claude(user, system=system, space_notes=space_notes, max_tokens=120)
+    return call_claude(user, system=system, space_notes=space_notes, max_tokens=120, lang=lang)
 
 
 def generate_weekly_report_insight(
@@ -211,6 +230,7 @@ def generate_weekly_report_insight(
     daily_weather: List[Dict[str, Any]],
     day_context_list: List[Dict[str, Any]],
     space_notes: str = "",
+    lang: str = "English",
 ) -> str:
     """
     Weekly synthesis: DIAGNOSIS (2-3 sentences), PATTERN (2 bullets), ACTIONS (2 bullets).
@@ -237,12 +257,13 @@ def generate_weekly_report_insight(
         "Focus on the 'so what' - what does this mean for the business?\n"
         "IMPORTANT: English only. Follow the DIAGNOSIS/PATTERN/ACTIONS structure exactly."
     )
-    return call_claude(user, system=system, space_notes=space_notes, max_tokens=_SYNTHESIS_MAX_TOKENS)
+    return call_claude(user, system=system, space_notes=space_notes, max_tokens=_SYNTHESIS_MAX_TOKENS, lang=lang)
 
 
 def generate_prediction_comment(
     predictions: List[Dict[str, Any]],
     space_notes: str = "",
+    lang: str = "English",
 ) -> str:
     """
     Generate 1-2 sentence operational comment for next week from prediction data.
@@ -273,4 +294,4 @@ def generate_prediction_comment(
         "Give 2 sentences: (1) what to expect, (2) one specific action to take.\n"
         "IMPORTANT: English only."
     )
-    return call_claude(user, system=system, space_notes=space_notes, max_tokens=120)
+    return call_claude(user, system=system, space_notes=space_notes, max_tokens=120, lang=lang)

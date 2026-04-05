@@ -1,7 +1,13 @@
 """
 공간(Space) 단위 데이터 로더.
 - 공간 탐색, S-Ward 설정 로드, Raw 일별/기간 로드.
+- store_config.json 로드: Sector별 운영 파라미터 (영업시간, 체류시간 세그먼트 등)
 """
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
@@ -14,6 +20,84 @@ from src.config.paths import (
     get_rawdata_path,
     get_sward_config_path,
 )
+from src.config.constants import (
+    STORE_OPEN_HOUR,
+    STORE_CLOSE_HOUR,
+    MIN_HITS_PER_MIN,
+    DWELL_SHORT_MAX,
+    DWELL_MEDIUM_MAX,
+)
+
+logger = logging.getLogger(__name__)
+
+
+# ── Store Configuration ─────────────────────────────────────────────────────
+
+@dataclass
+class StoreConfig:
+    """Sector별 운영 파라미터. store_config.json에서 로드하거나 기본값 사용."""
+
+    store_open_hour: int = STORE_OPEN_HOUR       # 영업 시작 (inclusive)
+    store_close_hour: int = STORE_CLOSE_HOUR     # 영업 종료 (exclusive)
+    min_hits_per_min: int = MIN_HITS_PER_MIN     # 방문객 진입 최소 신호 수
+    min_dwell_seconds: int = 60                   # 최소 체류 시간 (초)
+    rssi_threshold_apple: int = -75               # Apple RSSI 임계값
+    rssi_threshold_android: int = -85             # Android RSSI 임계값
+    rssi_pass_ratio: float = 0.80                 # RSSI 통과율 (3중 필터)
+    dwell_short_max: int = DWELL_SHORT_MAX       # 단기 체류 상한 (초)
+    dwell_medium_max: int = DWELL_MEDIUM_MAX     # 중기 체류 상한 (초)
+    description: str = ""                         # 설명 (선택)
+
+    def is_24h(self) -> bool:
+        """24시간 영업 여부."""
+        return self.store_open_hour == 0 and self.store_close_hour == 24
+
+
+def get_store_config_path(space_name: str) -> Path:
+    """공간별 store_config.json 파일 경로 반환."""
+    return get_space_path(space_name) / "sward_configuration" / "store_config.json"
+
+
+def load_store_config(space_name: str) -> StoreConfig:
+    """
+    공간의 store_config.json 로드.
+
+    store_config.json이 없으면 constants.py의 기본값을 사용하여 StoreConfig 반환.
+    일부 필드만 있는 경우 나머지는 기본값 사용.
+    """
+    path = get_store_config_path(space_name)
+    if not path.exists():
+        logger.debug("store_config.json not found for %s, using defaults", space_name)
+        return StoreConfig()
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # 기본값을 먼저 설정하고, JSON에 있는 값으로 덮어쓰기
+        config = StoreConfig(
+            store_open_hour=data.get("store_open_hour", STORE_OPEN_HOUR),
+            store_close_hour=data.get("store_close_hour", STORE_CLOSE_HOUR),
+            min_hits_per_min=data.get("min_hits_per_min", MIN_HITS_PER_MIN),
+            min_dwell_seconds=data.get("min_dwell_seconds", 60),
+            rssi_threshold_apple=data.get("rssi_threshold_apple", -75),
+            rssi_threshold_android=data.get("rssi_threshold_android", -85),
+            rssi_pass_ratio=data.get("rssi_pass_ratio", 0.80),
+            dwell_short_max=data.get("dwell_short_max", DWELL_SHORT_MAX),
+            dwell_medium_max=data.get("dwell_medium_max", DWELL_MEDIUM_MAX),
+            description=data.get("description", ""),
+        )
+        logger.info(
+            "Loaded store_config for %s: open=%d, close=%d, 24h=%s",
+            space_name, config.store_open_hour, config.store_close_hour, config.is_24h(),
+        )
+        return config
+    except json.JSONDecodeError as e:
+        logger.warning("Failed to parse store_config.json for %s: %s, using defaults", space_name, e)
+        return StoreConfig()
+    except Exception as e:
+        logger.warning("Error loading store_config.json for %s: %s, using defaults", space_name, e)
+        return StoreConfig()
 
 
 def discover_spaces() -> List[str]:

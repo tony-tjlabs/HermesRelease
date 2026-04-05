@@ -1,0 +1,51 @@
+[
+  {
+    "date": "2026-03-23",
+    "floating_unique": 4226,
+    "visitor_count": 538,
+    "conversion_rate": 12.73,
+    "dwell_seconds_mean": 226.26
+  },
+  {
+    "date": "2026-03-24",
+    "floating_unique": 6019,
+    "visitor_count": 802,
+    "conversion_rate": 13.32,
+    "dwell_seconds_mean": 257.39
+  },
+  {
+    "date": "2026-03-25",
+    "floating_unique": 5993,
+    "visitor_count": 831,
+    "conversion_rate": 13.87,
+    "dwell_seconds_mean": 252.58
+  },
+  {
+    "date": "2026-03-26",
+    "floating_unique": 4859,
+    "visitor_count": 620,
+    "conversion_rate": 12.76,
+    "dwell_seconds_mean": 322.82
+  },
+  {
+    "date": "2026-03-27",
+    "floating_unique": 4592,
+    "visitor_count": 544,
+    "conversion_rate": 11.85,
+    "dwell_seconds_mean": 303.95
+  },
+  {
+    "date": "2026-03-28",
+    "floating_unique": 3145,
+    "visitor_count": 357,
+    "conversion_rate": 11.35,
+    "dwell_seconds_mean": 163.73
+  },
+  {
+    "date": "2026-03-29",
+    "floating_unique": 2970,
+    "visitor_count": 362,
+    "conversion_rate": 12.19,
+    "dwell_seconds_mean": 182.04
+  }
+]

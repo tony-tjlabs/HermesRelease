@@ -41,9 +41,21 @@ class HermesBLEEngine:
         self,
         sward_config: pd.DataFrame,
         rssi_threshold_override: Optional[int] = None,
+        store_open_hour: int = STORE_OPEN_HOUR,
+        store_close_hour: int = STORE_CLOSE_HOUR,
+        min_hits_per_min: int = MIN_HITS_PER_MIN,
+        min_dwell_seconds: int = 60,
+        rssi_pass_ratio: float = 0.80,
     ):
         self.sward_config = sward_config.copy()
         self.sward_config["sward_name"] = self.sward_config["sward_name"].astype(str).str.strip()
+
+        # Store operating hours (for CVR calculation)
+        self.store_open_hour = store_open_hour
+        self.store_close_hour = store_close_hour
+        self.min_hits_per_min = min_hits_per_min
+        self.min_dwell_seconds = min_dwell_seconds
+        self.rssi_pass_ratio = rssi_pass_ratio
 
         self.entrance_swards: List[str] = self.sward_config[
             self.sward_config["install_location"] == INSTALL_ENTRANCE
@@ -123,100 +135,66 @@ class HermesBLEEngine:
         return pd.DataFrame(rows)
 
     def floating_daily_unique(self, df: pd.DataFrame) -> int:
-        """Daily floating: unique MAC during store operating hours (STORE_OPEN_HOUR ~ STORE_CLOSE_HOUR).
+        """Daily floating population: unique MACs from ALL sensors (entrance + inside).
 
-        CVR(방문율) = Visitors / FP 이므로, 영업 외 시간(10시 이전, 22시 이후) MAC은
-        분모에서 제외해야 정확한 방문율을 계산할 수 있다.
+        FP = 유동인구 = 매장 근처에서 감지된 모든 unique MAC.
+        - entrance 센서: 매장 앞 지나가는 사람 + 들어오는 사람
+        - inside 센서: 매장 안에 들어온 사람
+
+        FP는 반드시 Visitors를 포함해야 하므로 (CVR = Visitors / FP ≤ 100%),
+        entrance만이 아니라 **모든 센서**에서 감지된 MAC을 합산한다.
+
+        각 센서별 RSSI 임계값 적용:
+        - entrance: self.floating_rssi
+        - inside: FALLBACK_FLOATING_RSSI (-90dBm, 더 관대한 기준)
+
+        Note: store_open_hour, store_close_hour은 인스턴스 생성 시 지정.
+              24시간 영업(open=0, close=24)이면 필터링 없음.
         """
         if df.empty:
             return 0
+
+        # ── Entrance 센서 MAC 수집 ─────────────────────────────────────────
+        entrance_macs = set()
         if self.entrance_swards:
-            use_df = df[df["sward_name"].isin(self.entrance_swards)]
-            th = self.floating_rssi
-        else:
-            use_df = df[df["sward_name"].isin(self.inside_swards)]
-            th = FALLBACK_FLOATING_RSSI
-        use_df = use_df[use_df["rssi"] >= th]
-        # ── 운영 시간 필터: 10:00–22:00 (exclusive) ──────────────────────────
-        hour_series = (use_df["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int)
-        use_df = use_df[(hour_series >= STORE_OPEN_HOUR) & (hour_series < STORE_CLOSE_HOUR)]
-        return use_df["mac_address"].nunique()
+            ent_df = df[df["sward_name"].isin(self.entrance_swards)]
+            ent_df = ent_df[ent_df["rssi"] >= self.floating_rssi]
+            if not (self.store_open_hour == 0 and self.store_close_hour == 24):
+                hour_s = (ent_df["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int)
+                ent_df = ent_df[(hour_s >= self.store_open_hour) & (hour_s < self.store_close_hour)]
+            entrance_macs = set(ent_df["mac_address"].unique())
 
-    def _visitor_strict_entry_candidates(self, df: pd.DataFrame) -> pd.DataFrame:
+        # ── Inside 센서 MAC 수집 ───────────────────────────────────────────
+        inside_macs = set()
+        if self.inside_swards:
+            ins_df = df[df["sward_name"].isin(self.inside_swards)]
+            ins_df = ins_df[ins_df["rssi"] >= FALLBACK_FLOATING_RSSI]
+            if not (self.store_open_hour == 0 and self.store_close_hour == 24):
+                hour_s = (ins_df["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int)
+                ins_df = ins_df[(hour_s >= self.store_open_hour) & (hour_s < self.store_close_hour)]
+            inside_macs = set(ins_df["mac_address"].unique())
+
+        # ── 합집합 = 전체 유동인구 ─────────────────────────────────────────
+        all_macs = entrance_macs | inside_macs
+        return len(all_macs)
+
+    def build_sessions(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Strict Entry (Hermes Standard): inside sensor only.
-        For each MAC, at least one window of "latest 1 min" (current time_index + previous 5 = 6 slots)
-        such that: (1) hit count >= MIN_HITS_PER_MIN, (2) all RSSI in that window >= threshold.
-        Window for time_index t: [max(1, t-5), t] inclusive.
+        3-Stage Visitor Detection (inspired by TheHyundaiSeoul).
 
-        RSSI threshold is device-type-aware:
-          - Apple  (type=1) : self.inside_rssi          (sward_config 값 그대로)
-          - Android (type=10): self.inside_rssi_android  (= inside_rssi + ANDROID_RSSI_OFFSET)
-        """
-        inside = df[df["sward_name"].isin(self.inside_swards)].copy()
-        if inside.empty:
-            return pd.DataFrame()
+        Stage 1 — Session Construction (all signals, RSSI agnostic):
+          MAC별로 inside 센서의 모든 신호를 시간순 정렬.
+          갭 > hysteresis buffer이면 세션 분리.
+          exit_time_index = 마지막 실제 신호 (back-dating).
 
-        candidates = set()
-        type_col = "device_type" if "device_type" in inside.columns else "type"
-        for mac, grp in inside.groupby("mac_address"):
-            grp = grp.sort_values("time_index")
-            ti   = grp["time_index"].values
-            rssi = grp["rssi"].values
+        Stage 2 — Minimum Dwell Filter:
+          세션 체류 시간 ≥ min_dwell_seconds 이상만 유효.
 
-            # 디바이스 타입별 RSSI 임계값 분기
-            device_type_val = (
-                int(grp[type_col].iloc[0]) if type_col in grp.columns else DEVICE_TYPE_APPLE
-            )
-            th = (
-                self.inside_rssi_android
-                if device_type_val == DEVICE_TYPE_ANDROID
-                else self.inside_rssi
-            )
+        Stage 3 — RSSI Pass-Ratio Filter:
+          세션 내 전체 신호 중 rssi_pass_ratio (80%) 이상이
+          디바이스별 임계값(Apple -75 / Android -85)을 통과해야 방문자 인정.
 
-            for i in range(len(ti)):
-                t = int(ti[i])
-                start = max(1, t - (SLOTS_PER_MINUTE - 1))
-                mask = (ti >= start) & (ti <= t)
-                if mask.sum() >= MIN_HITS_PER_MIN and np.all(rssi[mask] >= th):
-                    candidates.add(mac)
-                    break
-        return inside[inside["mac_address"].isin(candidates)]
-
-    def build_sessions(
-        self,
-        df: pd.DataFrame,
-        visitor_macs: Optional[set] = None,
-    ) -> pd.DataFrame:
-        """
-        Build visitor sessions from inside-sensor data for Strict Entry candidates only.
-
-        Design intent — two-stage gate:
-        ┌─ Stage 1: _visitor_strict_entry_candidates() ─────────────────────────┐
-        │  A MAC must pass the Strict Entry test ONCE:                           │
-        │    · ≥ MIN_HITS_PER_MIN (2) signals within any 1-min window           │
-        │    · ALL those signals have RSSI ≥ inside_rssi (−80 dBm)             │
-        │  Only MACs that pass this gate are handed to build_sessions().         │
-        └────────────────────────────────────────────────────────────────────────┘
-        ┌─ Stage 2: build_sessions() (this method) ──────────────────────────────┐
-        │  Once admitted, RSSI is no longer checked — any subsequent signal      │
-        │  from the same MAC (regardless of strength) extends the session        │
-        │  via Hysteresis, until the buffer expires.                             │
-        │                                                                        │
-        │  Rationale: inside the store, signal strength fluctuates due to        │
-        │  multipath, body blocking, and sensor range.  Requiring RSSI ≥ −80   │
-        │  throughout would prematurely end valid sessions.  The Strict Entry    │
-        │  gate already ensures the device is genuinely inside; Hysteresis        │
-        │  handles the signal gaps that follow.                                  │
-        └────────────────────────────────────────────────────────────────────────┘
-
-        Session logic:
-        - Hysteresis: session continues if re-detected within buffer
-          (Apple 180 s = 18 slots, Android 120 s = 12 slots).
-        - Back-dating: exit_time_index = last actual signal received
-          (not the end of the Hysteresis buffer).
-        - Multiple sessions per MAC: if a gap exceeds the buffer, a new
-          session starts at the first signal after the gap.
+        This replaces the previous "Strict Entry" 1-min-window approach.
         """
         inside = df[df["sward_name"].isin(self.inside_swards)].copy()
         if inside.empty:
@@ -225,47 +203,94 @@ class HermesBLEEngine:
                 "dwell_seconds",
             ])
 
-        if visitor_macs is None:
-            entry_candidates = self._visitor_strict_entry_candidates(df)
-            visitor_macs = set(entry_candidates["mac_address"].unique())
+        # ── 영업시간 필터 (24시간 영업이 아닌 경우) ────────────────────────
+        if not (self.store_open_hour == 0 and self.store_close_hour == 24):
+            hour_s = (inside["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int)
+            inside = inside[(hour_s >= self.store_open_hour) & (hour_s < self.store_close_hour)]
+            if inside.empty:
+                return pd.DataFrame(columns=[
+                    "mac_address", "device_type", "entry_time_index", "exit_time_index",
+                    "dwell_seconds",
+                ])
 
         if "device_type" not in inside.columns and "type" in inside.columns:
             inside["device_type"] = inside["type"]
 
+        type_col = "device_type"
+
         sessions = []
-        for mac in visitor_macs:
-            mac_df = inside[inside["mac_address"] == mac].sort_values("time_index")
-            if mac_df.empty:
-                continue
-            device_type = int(mac_df["device_type"].iloc[0])
+        for mac, mac_group in inside.groupby("mac_address"):
+            mac_group = mac_group.sort_values("time_index")
+            device_type = int(mac_group[type_col].iloc[0])
             buffer_slots = self._exit_buffer_slots(device_type)
 
-            ti = mac_df["time_index"].values
-            entry_ti = int(ti[0])
-            last_ti = int(ti[0])
-            for t in ti[1:]:
-                t = int(t)
-                if t <= last_ti + buffer_slots:
-                    last_ti = t
-                else:
-                    sessions.append({
-                        "mac_address": mac,
-                        "device_type": device_type,
-                        "entry_time_index": entry_ti,
-                        "exit_time_index": last_ti,
-                        "dwell_seconds": (last_ti - entry_ti) * TIME_UNIT_SECONDS,
-                    })
-                    entry_ti = t
-                    last_ti = t
-            sessions.append({
-                "mac_address": mac,
-                "device_type": device_type,
-                "entry_time_index": entry_ti,
-                "exit_time_index": last_ti,
-                "dwell_seconds": (last_ti - entry_ti) * TIME_UNIT_SECONDS,
-            })
+            # RSSI 임계값 (디바이스별)
+            rssi_th = (
+                self.inside_rssi_android
+                if device_type == DEVICE_TYPE_ANDROID
+                else self.inside_rssi
+            )
 
-        return pd.DataFrame(sessions)
+            ti = mac_group["time_index"].values
+            rssi_vals = mac_group["rssi"].values
+
+            # ── Stage 1: Session construction (gap-based split) ──────────
+            seg_start = 0
+            for i in range(1, len(ti)):
+                if int(ti[i]) > int(ti[i - 1]) + buffer_slots:
+                    # Close previous segment
+                    self._evaluate_and_add_session(
+                        sessions, mac, device_type, rssi_th,
+                        ti[seg_start:i], rssi_vals[seg_start:i],
+                    )
+                    seg_start = i
+            # Last segment
+            self._evaluate_and_add_session(
+                sessions, mac, device_type, rssi_th,
+                ti[seg_start:], rssi_vals[seg_start:],
+            )
+
+        return pd.DataFrame(sessions) if sessions else pd.DataFrame(columns=[
+            "mac_address", "device_type", "entry_time_index", "exit_time_index",
+            "dwell_seconds",
+        ])
+
+    def _evaluate_and_add_session(
+        self,
+        sessions: list,
+        mac: str,
+        device_type: int,
+        rssi_th: int,
+        ti_arr: np.ndarray,
+        rssi_arr: np.ndarray,
+    ) -> None:
+        """Stage 2 + 3: minimum dwell + RSSI pass-ratio filter."""
+        if len(ti_arr) == 0:
+            return
+
+        entry_ti = int(ti_arr[0])
+        exit_ti = int(ti_arr[-1])
+        dwell_sec = (exit_ti - entry_ti) * TIME_UNIT_SECONDS
+
+        # ── Stage 2: Minimum dwell ───────────────────────────────────────
+        if dwell_sec < self.min_dwell_seconds:
+            return
+
+        # ── Stage 3: RSSI pass-ratio ─────────────────────────────────────
+        total_signals = len(rssi_arr)
+        pass_count = int(np.sum(rssi_arr >= rssi_th))
+        pass_ratio = pass_count / total_signals if total_signals > 0 else 0
+
+        if pass_ratio < self.rssi_pass_ratio:
+            return
+
+        sessions.append({
+            "mac_address": mac,
+            "device_type": device_type,
+            "entry_time_index": entry_ti,
+            "exit_time_index": exit_ti,
+            "dwell_seconds": dwell_sec,
+        })
 
     def run_daily(self, df: pd.DataFrame) -> Dict:
         """
@@ -285,28 +310,31 @@ class HermesBLEEngine:
             }
 
         floating_unique = self.floating_daily_unique(df)
-        entry_candidates = self._visitor_strict_entry_candidates(df)
-        visitor_macs = set(entry_candidates["mac_address"].unique())
-        sessions_df = self.build_sessions(df, visitor_macs=visitor_macs)
+        sessions_df = self.build_sessions(df)
         visitor_count = len(sessions_df)
         cvr = (visitor_count / floating_unique * 100.0) if floating_unique > 0 else 0.0
         dwell_mean = float(sessions_df["dwell_seconds"].mean()) if len(sessions_df) > 0 else 0.0
 
-        # Hourly floating: unique MACs per hour — must use nunique(), not sum() of rolling-window rows.
-        # floating_per_time_index() produces one row per time_index with a 1-min rolling window count.
-        # Summing those rows over an hour inflates the count by ~360x, making hourly CVR near zero.
-        # Correct method: same filter as floating_daily_unique(), then nunique() per hour.
+        # Hourly floating: unique MACs per hour from ALL sensors (entrance + inside).
+        # Same logic as floating_daily_unique() but grouped by hour.
+        fp_parts = []
         if self.entrance_swards:
-            fp_raw = df[df["sward_name"].isin(self.entrance_swards)].copy()
-            fp_th = self.floating_rssi
-        else:
-            fp_raw = df[df["sward_name"].isin(self.inside_swards)].copy()
-            fp_th = FALLBACK_FLOATING_RSSI
-        fp_raw = fp_raw[fp_raw["rssi"] >= fp_th].copy()
-        if not fp_raw.empty:
-            fp_raw["hour"] = (fp_raw["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int).clip(0, 23)
+            ent = df[df["sward_name"].isin(self.entrance_swards)].copy()
+            ent = ent[ent["rssi"] >= self.floating_rssi]
+            if not ent.empty:
+                ent["hour"] = (ent["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int).clip(0, 23)
+                fp_parts.append(ent[["hour", "mac_address"]])
+        if self.inside_swards:
+            ins = df[df["sward_name"].isin(self.inside_swards)].copy()
+            ins = ins[ins["rssi"] >= FALLBACK_FLOATING_RSSI]
+            if not ins.empty:
+                ins["hour"] = (ins["time_index"] * TIME_UNIT_SECONDS // SECONDS_PER_HOUR).astype(int).clip(0, 23)
+                fp_parts.append(ins[["hour", "mac_address"]])
+
+        if fp_parts:
+            fp_all = pd.concat(fp_parts, ignore_index=True)
             hourly_floating = (
-                fp_raw.groupby("hour")["mac_address"].nunique()
+                fp_all.groupby("hour")["mac_address"].nunique()
                 .reset_index()
                 .rename(columns={"mac_address": "floating_count"})
             )
@@ -357,17 +385,24 @@ class HermesBLEEngine:
         """
         minutes_range = range(MINUTES_PER_DAY)
 
-        # ── Floating population: unique MACs per minute ─────────────────────
+        # ── Floating population: unique MACs per minute (all sensors) ────────
+        fp_parts = []
         if self.entrance_swards:
-            fp_raw = df[
+            ent = df[
                 df["sward_name"].isin(self.entrance_swards)
                 & (df["rssi"] >= self.floating_rssi)
-            ].copy()
-        else:
-            fp_raw = df[
+            ]
+            if not ent.empty:
+                fp_parts.append(ent[["time_index", "mac_address"]])
+        if self.inside_swards:
+            ins = df[
                 df["sward_name"].isin(self.inside_swards)
                 & (df["rssi"] >= FALLBACK_FLOATING_RSSI)
-            ].copy()
+            ]
+            if not ins.empty:
+                fp_parts.append(ins[["time_index", "mac_address"]])
+
+        fp_raw = pd.concat(fp_parts, ignore_index=True) if fp_parts else pd.DataFrame()
 
         if not fp_raw.empty:
             fp_raw["minute"] = (

@@ -226,6 +226,19 @@ class CacheLoader:
                     self._daily_results_raw = json.load(f)
         return self._daily_results_raw
 
+    # ── Android FP Correction calibration ─────────────────────────────────
+
+    def get_correction_calibration(self) -> Optional[Dict]:
+        """보정 캘리브레이션 결과 로드. 없으면 None."""
+        path = self.cache_dir / "correction_calibration.json"
+        if not path.exists():
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
     # ── Space notes (independent of precompute) ───────────────────────────
 
     def get_space_notes(self) -> str:

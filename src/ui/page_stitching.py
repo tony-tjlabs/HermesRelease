@@ -14,8 +14,8 @@ from src.analytics.dwell_intelligence import dwell_distribution
 from src.analytics.device_craft import device_mix_by_date
 from src.ui.chart_theme import apply_theme
 
-# Palette
-DEEP_NAVY = "#0f172a"
+# Palette (dark theme)
+DEEP_NAVY = "#4A90D9"
 GOLD = "#c49a3a"
 AMBER = "#d97706"
 SLATE_GRAY = "#64748b"
@@ -320,7 +320,7 @@ sessions that slipped through L1 due to sensor gaps.
                 st.markdown("**Raw (Before Stitching)**")
                 fig_dr = px.bar(
                     dist_raw, x="segment", y="count", color="ratio",
-                    color_continuous_scale=["#f8fafc", SLATE_GRAY, DEEP_NAVY],
+                    color_continuous_scale=["#1a2035", SLATE_GRAY, "#ccd6f6"],
                 )
                 fig_dr.update_layout(height=280, title="Raw Dwell Segments", showlegend=False)
                 apply_theme(fig_dr)
@@ -334,7 +334,7 @@ sessions that slipped through L1 due to sensor gaps.
                 st.markdown("**After Stitching**")
                 fig_ds = px.bar(
                     dist_stitched, x="segment", y="count", color="ratio",
-                    color_continuous_scale=["#f8fafc", GOLD, DEEP_NAVY],
+                    color_continuous_scale=["#1a2035", GOLD, "#ccd6f6"],
                 )
                 fig_ds.update_layout(height=280, title="Stitched Dwell Segments", showlegend=False)
                 apply_theme(fig_ds)
