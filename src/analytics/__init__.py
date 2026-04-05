@@ -1,3 +1,1 @@
-from .ble_engine import HermesBLEEngine
-
-__all__ = ["HermesBLEEngine"]
+# Analytics — Release build (cache-only, no BLE engine)
