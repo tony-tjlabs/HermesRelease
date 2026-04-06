@@ -76,10 +76,11 @@ def _cached_hourly_stats(
     daily_stats_json: str,
 ) -> pd.DataFrame:
     """Cached wrapper for hourly_stats_flexible to avoid recomputation on reruns."""
-    daily_hourly = pd.read_json(daily_hourly_json, orient="split") if daily_hourly_json else pd.DataFrame()
-    sessions = pd.read_json(sessions_json, orient="split") if sessions_json else pd.DataFrame()
-    daily_timeseries = pd.read_json(daily_timeseries_json, orient="split") if daily_timeseries_json else pd.DataFrame()
-    daily_stats = pd.read_json(daily_stats_json, orient="split") if daily_stats_json else None
+    from io import StringIO
+    daily_hourly = pd.read_json(StringIO(daily_hourly_json), orient="split") if daily_hourly_json else pd.DataFrame()
+    sessions = pd.read_json(StringIO(sessions_json), orient="split") if sessions_json else pd.DataFrame()
+    daily_timeseries = pd.read_json(StringIO(daily_timeseries_json), orient="split") if daily_timeseries_json else pd.DataFrame()
+    daily_stats = pd.read_json(StringIO(daily_stats_json), orient="split") if daily_stats_json else None
     return hourly_stats_flexible(
         daily_hourly, sessions, daily_timeseries,
         list(dates), bin_minutes=bin_minutes,
@@ -96,7 +97,6 @@ def _get_hourly_stats_cached(
     daily_stats: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Helper that serializes DataFrames for caching."""
-    # Convert to JSON for hashable cache key
     dh_json = daily_hourly.to_json(orient="split", date_format="iso") if not daily_hourly.empty else ""
     sess_json = sessions.to_json(orient="split", date_format="iso") if not sessions.empty else ""
     ts_json = daily_timeseries.to_json(orient="split", date_format="iso") if not daily_timeseries.empty else ""
