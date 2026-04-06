@@ -1,37 +1,7 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# macOS
-.DS_Store
-
-# Secrets and env (never commit API keys)
-.streamlit/secrets.toml
 .env
-.env.local
-.env.*.local
-
-# Raw data — large CSV files, not needed for dashboard display
-# Only cache files (Parquet/JSON, ~5 MB total) are committed for Streamlit Cloud
-Datafile/**/rawdata/
-
-# Artifacts
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.DS_Store
+Datafile/*/rawdata/
 .artifacts/
-
-# IDE
-.idea/
-.vscode/

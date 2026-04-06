@@ -1,1 +1,2 @@
-# Analytics — Release build (cache-only, no BLE engine)
+# Analytics — cloud deployment (core engine excluded)
+__all__ = []

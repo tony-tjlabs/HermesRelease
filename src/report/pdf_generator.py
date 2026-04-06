@@ -45,16 +45,18 @@ _CM = {
 }
 
 def cl(s: str, max_chars: Optional[int] = None) -> str:
-    """Clean string for Helvetica (Latin-1 safe). Optionally truncate to max_chars at word boundary."""
+    """Clean string for PDF. If NanumGothic available, keep Korean; otherwise Latin-1 only."""
     if not s:
         return ""
     s = str(s)
     for k, v in _CM.items():
         s = s.replace(k, v)
-    out = "".join(c if ord(c) < 256 else "?" for c in s)
-    if max_chars is not None and len(out) > max_chars:
-        out = out[:max_chars].rsplit(" ", 1)[0] + " ..." if " " in out[:max_chars] else out[:max_chars] + " ..."
-    return out
+    if not _HAS_NANUM:
+        # Fallback: Latin-1 safe only
+        s = "".join(c if ord(c) < 256 else "?" for c in s)
+    if max_chars is not None and len(s) > max_chars:
+        s = s[:max_chars].rsplit(" ", 1)[0] + " ..." if " " in s[:max_chars] else s[:max_chars] + " ..."
+    return s
 
 # ── Temp PNG helper ─────────────────────────────────────────────────────────
 def _png(fig) -> bytes:
@@ -127,7 +129,7 @@ class SectionTitleBlock(Block):
     def draw(self, pdf: "HermesPDF"):
         pdf.fc(NAVY)
         pdf.tc(WHITE)
-        pdf.set_font("Helvetica", "B", 10.5)
+        pdf.set_font(pdf._font_name, "B", 10.5)
         pdf.cell(0, 7, f"  {self.n}. {cl(self.title)}", fill=True, ln=True)
         pdf.tc((0, 0, 0))
         pdf.ln(1.5)
@@ -140,7 +142,7 @@ class SubHeadBlock(Block):
 
     def draw(self, pdf: "HermesPDF"):
         pdf.tc(NAVY)
-        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_font(pdf._font_name, "B", 8.5)
         pdf.cell(0, 5, cl(self.text), ln=True)
         pdf.tc((0, 0, 0))
         pdf.ln(0.5)
@@ -154,7 +156,9 @@ class TextBlock(Block):
         self.indent = indent
         self.lh = lh or self.LH
         effective_width = 182 - indent
-        chars_per_line = max(1, int(effective_width * 0.49))
+        has_korean = any('\uac00' <= c <= '\ud7a3' for c in (text or ""))
+        factor = 0.28 if has_korean else 0.49
+        chars_per_line = max(1, int(effective_width * factor))
         lines = 0
         for para in (text or "").split("\n"):
             lines += max(1, math.ceil(len(para) / chars_per_line))
@@ -162,7 +166,7 @@ class TextBlock(Block):
 
     def draw(self, pdf: "HermesPDF"):
         pdf.set_x(pdf.l_margin + self.indent)
-        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_font(pdf._font_name, "", 8.5)
         pdf.tc(SLATE)
         pdf.multi_cell(0, self.lh, cl(self.text))
         pdf.tc((0, 0, 0))
@@ -174,14 +178,16 @@ class BulletBlock(Block):
     def __init__(self, text: str, num: Optional[int] = None):
         self.text = text
         self.num = num
-        chars_per_line = int(176 * 0.49)
+        has_korean = any('\uac00' <= c <= '\ud7a3' for c in (text or ""))
+        factor = 0.28 if has_korean else 0.49
+        chars_per_line = int(176 * factor)
         lines = max(1, math.ceil(len(text) / chars_per_line))
         super().__init__(lines * self.LH + 0.5)
 
     def draw(self, pdf: "HermesPDF"):
         pfx = f"{self.num}." if self.num is not None else "-"
         pdf.set_x(pdf.l_margin + 3)
-        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_font(pdf._font_name, "", 8.5)
         pdf.tc(SLATE)
         pdf.multi_cell(0, self.LH, f"{pfx}  {cl(self.text)}")
         pdf.tc((0, 0, 0))
@@ -196,7 +202,7 @@ class SmallTextBlock(Block):
 
     def draw(self, pdf: "HermesPDF"):
         style = "I" if self.italic else ""
-        pdf.set_font("Helvetica", style, 7.5)
+        pdf.set_font(pdf._font_name, style, 7.5)
         pdf.tc(self.color)
         pdf.cell(0, 4.5, cl(self.text), ln=True)
         pdf.tc((0, 0, 0))
@@ -258,29 +264,29 @@ class KPICardsBlock(Block):
             pdf.fc(NAVY)
             pdf.rect(x, y, CW4, 1.5, "F")
             pdf.set_xy(x + 2, y + 2.5)
-            pdf.set_font("Helvetica", "B", 6.5)
+            pdf.set_font(pdf._font_name, "B", 6.5)
             pdf.tc(SLATE)
             pdf.cell(CW4 - 4, 4, cl(meta["label"]), ln=True)
             pdf.set_xy(x + 2, y + 8)
-            pdf.set_font("Helvetica", "B", 14)
+            pdf.set_font(pdf._font_name, "B", 14)
             pdf.tc(NAVY)
             pdf.cell(CW4 - 4, 7, cl(val), ln=True)
             pdf.set_xy(x + 2, y + 16.5)
-            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.set_font(pdf._font_name, "B", 7.5)
             pdf.tc(dcol)
             pdf.cell(CW4 - 4, 4.5, cl(delta + " vs prev week"), ln=True)
             pdf.set_xy(x + 2, y + 22.5)
-            pdf.set_font("Helvetica", "I", 6.5)
+            pdf.set_font(pdf._font_name, "I", 6.5)
             pdf.tc(SLATE)
             pdf.multi_cell(CW4 - 4, 3.5, cl(meta.get("sub", "")))
         pdf.tc((0, 0, 0))
         pdf.set_y(y + CH + 2)
         pdf.fc(LBG)
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_font(pdf._font_name, "B", 8)
         pdf.tc(NAVY)
         pdf.cell(0, 5.5, "  Weekly Performance Summary:", fill=True, ln=True)
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_font(pdf._font_name, "", 8)
         pdf.tc(SLATE)
         pdf.set_x(pdf.l_margin)
         pdf.multi_cell(0, 4.8, "  " + cl(self.summary))
@@ -310,21 +316,25 @@ class AIBoxBlock(Block):
     PADDING = 4
     LINE_HEIGHT_MM = 4.4
     LABEL_H = 6.5
-    CHARS_PER_LINE = 95  # approx at 8pt, A4 width minus margins
+    CHARS_PER_LINE_EN = 95   # English: ~95 chars/line at 8pt
+    CHARS_PER_LINE_KR = 50   # Korean: wider glyphs, ~50 chars/line
     MIN_H = 20
-    MAX_H = 55
+    MAX_H = 120  # Increased for Korean (was 55)
 
-    def __init__(self, content: str, max_chars: int = 1200):
+    def __init__(self, content: str, max_chars: int = 2000):
         self.content = (content or "").strip()
         if not self.content:
             self.content = "(AI analysis unavailable)"
         self.content = cl(self.content, max_chars=max_chars)
+        # Detect Korean content → use wider char estimate
+        has_korean = any('\uac00' <= c <= '\ud7a3' for c in self.content)
+        cpl = self.CHARS_PER_LINE_KR if has_korean else self.CHARS_PER_LINE_EN
         lines = 0
         for para in self.content.split("\n"):
             if not para.strip():
                 lines += 1
                 continue
-            lines += max(1, math.ceil(len(para) / self.CHARS_PER_LINE))
+            lines += max(1, math.ceil(len(para) / cpl))
         content_h = lines * self.LINE_HEIGHT_MM
         box_h = max(self.MIN_H, min(self.LABEL_H + self.PADDING * 2 + content_h, self.MAX_H))
         super().__init__(box_h + 2)
@@ -342,11 +352,11 @@ class AIBoxBlock(Block):
         pdf.rect(pdf.l_margin, y, 2.5, h, "F")
         pdf.fc(NAVY)
         pdf.tc(WHITE)
-        pdf.set_font("Helvetica", "B", 6)
+        pdf.set_font(pdf._font_name, "B", 6)
         pdf.set_xy(pdf.l_margin + 4, y + 1.8)
         pdf.cell(14, 3.5, "  AI Analysis", fill=True)
         pdf.set_xy(pdf.l_margin + self.PADDING, y + self.LABEL_H)
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_font(pdf._font_name, "", 8)
         pdf.tc(SLATE)
         pdf.multi_cell(w - self.PADDING * 2, self.LINE_HEIGHT_MM, self.content)
         pdf.tc((0, 0, 0))
@@ -378,7 +388,7 @@ class WeatherTableBlock(Block):
             y = pdf.get_y()
             pdf.fc(NAVY)
             pdf.tc(WHITE)
-            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.set_font(pdf._font_name, "B", 7.5)
             pdf.rect(pdf.l_margin, y, LW, rh, "F")
             pdf.set_xy(pdf.l_margin + 1, y + (rh - 4) / 2)
             pdf.cell(LW - 1, 4, lbl)
@@ -393,7 +403,7 @@ class WeatherTableBlock(Block):
                 pdf.rect(x, y, dw, rh, "F")
                 pdf.dc(BDR)
                 pdf.rect(x, y, dw, rh)
-                pdf.set_font("Helvetica", "B" if ri == 0 else "", 7 if ri >= 2 else 7.5)
+                pdf.set_font(pdf._font_name, "B" if ri == 0 else "", 7 if ri >= 2 else 7.5)
                 pdf.set_xy(x + 0.5, y + (rh - 4) / 2)
                 pdf.cell(dw - 1, 4, cl(str(val)), align="C")
             pdf.set_y(y + rh)
@@ -412,7 +422,7 @@ class CompTableBlock(Block):
         y = pdf.get_y()
         pdf.fc(NAVY)
         pdf.tc(WHITE)
-        pdf.set_font("Helvetica", "B", 8.5)
+        pdf.set_font(pdf._font_name, "B", 8.5)
         for ci, h in enumerate(self.headers):
             x = pdf.l_margin + ci * cw
             pdf.rect(x, y, cw, 7, "F")
@@ -423,7 +433,7 @@ class CompTableBlock(Block):
             y2 = pdf.get_y()
             pdf.fc(LBG if ri % 2 == 0 else WHITE)
             pdf.tc((40, 40, 40))
-            pdf.set_font("Helvetica", "", 8)
+            pdf.set_font(pdf._font_name, "", 8)
             for ci, cell in enumerate(row):
                 x2 = pdf.l_margin + ci * cw
                 pdf.rect(x2, y2, cw, 6, "F")
@@ -452,7 +462,7 @@ class ForecastGridBlock(Block):
             pdf.fc(NAVY if wk else SLATE)
             pdf.tc(WHITE)
             pdf.rect(x, y, cw, 7, "F")
-            pdf.set_font("Helvetica", "B", 7.5)
+            pdf.set_font(pdf._font_name, "B", 7.5)
             pdf.set_xy(x + 1, y + 1.5)
             dt = day.get("date")
             lbl = _fmt_d(dt) if hasattr(dt, "day") else str(dt)[:10]
@@ -460,19 +470,19 @@ class ForecastGridBlock(Block):
             pdf.fc(LBG)
             pdf.tc(NAVY)
             pdf.rect(x, y + 7, cw, 5, "F")
-            pdf.set_font("Helvetica", "B", 7)
+            pdf.set_font(pdf._font_name, "B", 7)
             pdf.set_xy(x + 1, y + 8.5)
             pdf.cell(cw - 1, 4, cl(day.get("wd", "")), align="C")
             pdf.fc(WHITE)
             pdf.tc((50, 50, 50))
             pdf.rect(x, y + 12, cw, 6, "F")
-            pdf.set_font("Helvetica", "", 6.5)
+            pdf.set_font(pdf._font_name, "", 6.5)
             pdf.set_xy(x + 1, y + 13.5)
             pdf.cell(cw - 1, 4, cl(f"FP: ~{day.get('predicted_fp', 0):,}"), align="C")
             pdf.fc(LBG)
             pdf.tc(NAVY)
             pdf.rect(x, y + 18, cw, 6, "F")
-            pdf.set_font("Helvetica", "B", 7)
+            pdf.set_font(pdf._font_name, "B", 7)
             pdf.set_xy(x + 1, y + 19.5)
             pdf.cell(cw - 1, 4, cl(f"CVR: {day.get('predicted_cvr', 0):.1f}%"), align="C")
             pdf.dc(BDR)
@@ -504,11 +514,11 @@ class ClosingBlock(Block):
         pdf.rect(pdf.l_margin, y, pdf.epw, 1, "F")
         pdf.set_xy(pdf.l_margin + 4, y + 3)
         pdf.tc(NAVY)
-        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_font(pdf._font_name, "B", 8)
         pdf.cell(0, 5, "About This Report", ln=True)
         pdf.set_x(pdf.l_margin + 4)
         pdf.tc(SLATE)
-        pdf.set_font("Helvetica", "", 7.5)
+        pdf.set_font(pdf._font_name, "", 7.5)
         start_s = self.start.strftime("%Y-%m-%d") if hasattr(self.start, "strftime") else str(self.start)
         end_s = self.end.strftime("%Y-%m-%d") if hasattr(self.end, "strftime") else str(self.end)
         pdf.multi_cell(pdf.epw - 8, 4.3, cl(
@@ -664,42 +674,103 @@ def _chart_traffic(week_df: pd.DataFrame) -> bytes:
 
 
 def _chart_dwell(week_df: pd.DataFrame, dwell_ratios: dict, quality_cvr: float) -> bytes:
+    """5-tier dwell funnel chart: stacked bar + donut.
+
+    dwell_ratios keys:
+      - "1_3min": 1~3 min
+      - "3_6min": 3~6 min
+      - "6_10min": 6~10 min
+      - "10_15min": 10~15 min
+      - "15plus": 15+ min
+
+    Colors:
+      - 1~3min: SLATE (#64748b)
+      - 3~6min: FP_COLOR (#4A90D9)
+      - 6~10min: TEAL (#64ffda)
+      - 10~15min: GOLD (#c49a3a)
+      - 15+min: AMBER (#d97706)
+    """
+    # Color definitions (RGB 0-255)
+    C_1_3 = (100, 116, 139)   # slate gray
+    C_3_6 = (74, 144, 217)    # blue
+    C_6_10 = (100, 255, 218)  # teal
+    C_10_15 = (196, 154, 58)  # gold
+    C_15plus = (217, 119, 6)  # amber
+
     if week_df.empty or len(week_df) == 0:
         fig, ax = plt.subplots(figsize=(9.0, 1.8))
         ax.set_facecolor("#f8f9fc")
         ax.text(0.5, 0.5, "No dwell data", ha="center", va="center", fontsize=10)
         ax.axis("off")
         return _png(fig)
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9.0, 1.8))
     fig.patch.set_facecolor("#f8f9fc")
     for ax in (ax1, ax2):
         ax.set_facecolor("#f8f9fc")
-    vis = week_df["quality_visitor_count"].tolist()
+
+    vis = week_df["quality_visitor_count"].tolist() if "quality_visitor_count" in week_df.columns else [0] * len(week_df)
     dates = [str(getattr(d, "day", d)) for d in week_df["date"]]
     x = list(range(len(dates)))
-    s = [v * dwell_ratios["short"] / 100 for v in vis]
-    m_ = [v * dwell_ratios["medium"] / 100 for v in vis]
-    l_ = [v * dwell_ratios["long"] / 100 for v in vis]
-    ax1.bar(x, s, color=_m(SLATE), alpha=0.85, label="Short (<3min)", width=0.6)
-    ax1.bar(x, m_, color=_m(NAVY), alpha=0.85, label="Medium (3-10min)", bottom=s, width=0.6)
-    ax1.bar(x, l_, color=_m(GOLD), alpha=0.95, label="Long (10min+)",
-            bottom=[a + b for a, b in zip(s, m_)], width=0.6)
+
+    # Extract ratios
+    r_1_3 = dwell_ratios.get("1_3min", 0) or 0
+    r_3_6 = dwell_ratios.get("3_6min", 0) or 0
+    r_6_10 = dwell_ratios.get("6_10min", 0) or 0
+    r_10_15 = dwell_ratios.get("10_15min", 0) or 0
+    r_15plus = dwell_ratios.get("15plus", 0) or 0
+
+    # Calculate bar heights
+    d_1_3 = [v * r_1_3 / 100 for v in vis]
+    d_3_6 = [v * r_3_6 / 100 for v in vis]
+    d_6_10 = [v * r_6_10 / 100 for v in vis]
+    d_10_15 = [v * r_10_15 / 100 for v in vis]
+    d_15plus = [v * r_15plus / 100 for v in vis]
+
+    # Stacked bar chart
+    bottom = [0] * len(x)
+    ax1.bar(x, d_1_3, color=_m(C_1_3), alpha=0.85, label="1-3min", width=0.6, bottom=bottom)
+    bottom = [a + b for a, b in zip(bottom, d_1_3)]
+    ax1.bar(x, d_3_6, color=_m(C_3_6), alpha=0.85, label="3-6min", width=0.6, bottom=bottom)
+    bottom = [a + b for a, b in zip(bottom, d_3_6)]
+    ax1.bar(x, d_6_10, color=_m(C_6_10), alpha=0.85, label="6-10min", width=0.6, bottom=bottom)
+    bottom = [a + b for a, b in zip(bottom, d_6_10)]
+    ax1.bar(x, d_10_15, color=_m(C_10_15), alpha=0.90, label="10-15min", width=0.6, bottom=bottom)
+    bottom = [a + b for a, b in zip(bottom, d_10_15)]
+    ax1.bar(x, d_15plus, color=_m(C_15plus), alpha=0.95, label="15+min", width=0.6, bottom=bottom)
+
     ax1.set_xticks(x)
     ax1.set_xticklabels(dates, fontsize=8.5)
     ax1.set_ylabel("Visitors", fontsize=8)
-    ax1.legend(fontsize=7, loc="upper right")
+    ax1.legend(fontsize=6, loc="upper right", ncol=2)
     ax1.grid(axis="y", ls="--", alpha=0.3)
     ax1.spines[["top", "right"]].set_visible(False)
-    ax1.set_title("Daily Dwell Funnel", fontsize=9, fontweight="bold", pad=4)
+    ax1.set_title("Daily Dwell Funnel (5-tier)", fontsize=9, fontweight="bold", pad=4)
     ax1.tick_params(labelsize=8)
-    sizes = [dwell_ratios["short"], dwell_ratios["medium"], dwell_ratios["long"]]
-    wedges, _ = ax2.pie(sizes, colors=[_m(SLATE), _m(NAVY), _m(GOLD)], startangle=90,
-                        wedgeprops=dict(width=0.5, edgecolor="white", lw=2))
+
+    # Donut chart
+    sizes = [r_1_3, r_3_6, r_6_10, r_10_15, r_15plus]
+    colors = [_m(C_1_3), _m(C_3_6), _m(C_6_10), _m(C_10_15), _m(C_15plus)]
+    # Filter out zero slices for cleaner donut
+    nonzero = [(s, c) for s, c in zip(sizes, colors) if s > 0]
+    if nonzero:
+        sizes_nz, colors_nz = zip(*nonzero)
+    else:
+        sizes_nz, colors_nz = [1], [_m(SLATE)]
+
+    wedges, _ = ax2.pie(sizes_nz, colors=colors_nz, startangle=90,
+                        wedgeprops=dict(width=0.45, edgecolor="white", lw=1.5))
     ax2.text(0, 0, f"Quality\nCVR\n{quality_cvr:.1f}%",
              ha="center", va="center", fontsize=9, fontweight="bold", color=_m(NAVY))
-    labels = [f"Short {dwell_ratios['short']:.1f}%", f"Medium {dwell_ratios['medium']:.1f}%",
-              f"Long {dwell_ratios['long']:.1f}%"]
-    ax2.legend(wedges, labels, loc="lower center", fontsize=7, bbox_to_anchor=(0.5, -0.06), ncol=3)
+
+    # Legend labels
+    labels = [
+        f"1-3m {r_1_3:.1f}%", f"3-6m {r_3_6:.1f}%", f"6-10m {r_6_10:.1f}%",
+        f"10-15m {r_10_15:.1f}%", f"15+m {r_15plus:.1f}%"
+    ]
+    # Filter labels to match nonzero wedges
+    labels_nz = [labels[i] for i, s in enumerate(sizes) if s > 0] or ["N/A"]
+    ax2.legend(wedges, labels_nz, loc="lower center", fontsize=6, bbox_to_anchor=(0.5, -0.10), ncol=3)
     ax2.set_title("Dwell Distribution", fontsize=9, fontweight="bold", pad=4)
     fig.tight_layout(pad=0.6)
     return _png(fig)
@@ -750,6 +821,11 @@ def _chart_nextweek(next_df: pd.DataFrame) -> bytes:
 
 
 # ── HermesPDF ──────────────────────────────────────────────────────────────
+_FONT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "fonts")
+_NANUM_PATH = os.path.join(_FONT_DIR, "NanumGothic.ttf")
+_HAS_NANUM = os.path.exists(_NANUM_PATH)
+
+
 class HermesPDF(FPDF):
     def __init__(self):
         super().__init__("P", "mm", "A4")
@@ -759,6 +835,15 @@ class HermesPDF(FPDF):
         self._space = ""
         self._rpt_start = ""
         self._rpt_end = ""
+        # Register Korean font if available
+        if _HAS_NANUM:
+            self.add_font("Nanum", "", _NANUM_PATH, uni=True)
+            self.add_font("Nanum", "B", _NANUM_PATH, uni=True)
+            self.add_font("Nanum", "I", _NANUM_PATH, uni=True)
+            self.add_font("Nanum", "BI", _NANUM_PATH, uni=True)
+            self._font_name = "Nanum"
+        else:
+            self._font_name = "Helvetica"
 
     def fc(self, c): self.set_fill_color(*c)
     def tc(self, c): self.set_text_color(*c)
@@ -771,14 +856,14 @@ class HermesPDF(FPDF):
         self.rect(0, 0, 210, 9, "F")
         self.set_y(1.5)
         self.tc(WHITE)
-        self.set_font("Helvetica", "B", 7.5)
+        self.set_font(self._font_name, "B", 7.5)
         self.cell(0, 5, f"  HERMES  |  {self._space}  |  {self._rpt_start} - {self._rpt_end}", ln=True)
         self.tc((0, 0, 0))
         self.set_y(P2_START)
 
     def footer(self):
         self.set_y(-11)
-        self.set_font("Helvetica", "I", 6.5)
+        self.set_font(self._font_name, "I", 6.5)
         self.tc(SLATE)
         self.cell(0, 4,
                   "(c) TJLABS Co., Ltd. All rights reserved.  |  "
@@ -798,19 +883,19 @@ class HermesPDF(FPDF):
         self.rect(0, 46, 210, 2, "F")
         self.set_y(9)
         self.tc(GOLD)
-        self.set_font("Helvetica", "B", 22)
+        self.set_font(self._font_name, "B", 22)
         self.cell(0, 10, "HERMES Weekly Traffic Report", align="C", ln=True)
         self.tc(WHITE)
-        self.set_font("Helvetica", "", 11)
+        self.set_font(self._font_name, "", 11)
         start_fmt = rpt_start.strftime("%b %d (%a)") if hasattr(rpt_start, "strftime") else str(rpt_start)
         end_fmt = rpt_end.strftime("%b %d (%a)") if hasattr(rpt_end, "strftime") else str(rpt_end)
         self.cell(0, 7, f"{space}  |  {start_fmt} - {end_fmt}, {getattr(rpt_end, 'year', '')}", align="C", ln=True)
         self.tc((175, 185, 210))
-        self.set_font("Helvetica", "I", 8.5)
+        self.set_font(self._font_name, "I", 8.5)
         self.cell(0, 5, f"Generated: {generated_at}", align="C", ln=True)
         self.set_y(40)
         self.tc((140, 155, 185))
-        self.set_font("Helvetica", "", 7)
+        self.set_font(self._font_name, "", 7)
         self.cell(0, 4, "Provided by TJLABS Co., Ltd.  |  pepper@tjlabscorp.com", align="C", ln=True)
         self.set_y(P1_START)
         self.tc((0, 0, 0))
@@ -867,12 +952,15 @@ def build_blocks(
     blocks.append(ChartBlock(traffic_img))
     blocks.append(AIBoxBlock(ai_texts.get("traffic", ""), max_chars=600))
 
-    blocks.append(SectionTitleBlock(n, "Dwell Funnel"))
+    blocks.append(SectionTitleBlock(n, "Dwell Funnel (5-tier)"))
     n += 1
+    # 5분류 텍스트
     blocks.append(SmallTextBlock(
-        f"Short (<3min): {dwell.get('short', 0):.1f}%  |  "
-        f"Medium (3-10min): {dwell.get('medium', 0):.1f}%  |  "
-        f"Long (10min+): {dwell.get('long', 0):.1f}%  |  Quality CVR: {quality_cvr:.1f}%",
+        f"1-3m: {dwell.get('1_3min', 0):.1f}%  |  "
+        f"3-6m: {dwell.get('3_6min', 0):.1f}%  |  "
+        f"6-10m: {dwell.get('6_10min', 0):.1f}%  |  "
+        f"10-15m: {dwell.get('10_15min', 0):.1f}%  |  "
+        f"15+m: {dwell.get('15plus', 0):.1f}%  |  Quality CVR: {quality_cvr:.1f}%",
         italic=False, color=SLATE))
     try:
         dwell_img = _chart_dwell(week_df, dwell, quality_cvr)
@@ -1069,10 +1157,13 @@ def _report_data_to_v2_args(
     }
 
     funnel = report_data.get("funnel", {})
+    # 5분류 dwell ratios
     dwell = {
-        "short": funnel.get("short_pct", 0),
-        "medium": funnel.get("medium_pct", 0),
-        "long": funnel.get("long_pct", 0),
+        "1_3min": funnel.get("1_3min_pct", 0),
+        "3_6min": funnel.get("3_6min_pct", 0),
+        "6_10min": funnel.get("6_10min_pct", 0),
+        "10_15min": funnel.get("10_15min_pct", 0),
+        "15plus": funnel.get("15plus_pct", 0),
     }
 
     synthesis = ai_insight or ""

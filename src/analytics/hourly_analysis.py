@@ -113,33 +113,72 @@ def hourly_stats_for_date(
 
 # ── 30-min bin helpers ────────────────────────────────────────────────────────
 
-def _compute_30min_stats(
+def _compute_subhour_stats(
     sessions: pd.DataFrame,
     daily_timeseries: pd.DataFrame,
+    daily_hourly: pd.DataFrame,
     date_str: str,
+    bin_minutes: int = 30,
+    daily_fp: int = 0,
 ) -> pd.DataFrame:
     """
-    Compute 30-minute-binned stats for a single date from sessions + timeseries.
+    Compute sub-hourly binned stats.
 
-    Returns DataFrame with 48 rows (bins 00:00–23:30).
-    Columns: bin_label, floating_count, visitor_count, cvr_pct,
-             dwell_sec_mean, ios_pct, android_pct
+    FP (floating_count):
+      Daily FP (from daily_stats, including Android correction) is distributed
+      proportionally across sub-bins using the hourly FP shape.
+      This ensures: sum of all bin FPs ≈ daily FP.
+
+    Visitors (visitor_count):
+      Unique visitor MACs from sessions, binned by entry_time_index.
+
+    CVR = Visitors / FP → consistent with daily CVR.
     """
-    bins = list(range(48))
-    bin_labels = [f"{b // 2:02d}:{(b % 2) * 30:02d}" for b in bins]
+    n_bins = 24 * 60 // bin_minutes
+    bins_per_hour = 60 // bin_minutes
+    bins = list(range(n_bins))
+    bin_labels = [
+        f"{(b * bin_minutes) // 60:02d}:{(b * bin_minutes) % 60:02d}"
+        for b in bins
+    ]
 
-    # ── Floating Population from timeseries (minute-level) ─────────────────
-    fp_by_bin = {b: 0 for b in bins}
+    # ── FP: distribute daily_fp proportionally using hourly shape ──────────
+    hourly_fp = {}
+    h_day = daily_hourly[daily_hourly["date"] == date_str] if not daily_hourly.empty and "date" in daily_hourly.columns else pd.DataFrame()
+    if not h_day.empty and "hour" in h_day.columns and "floating_count" in h_day.columns:
+        hourly_fp = dict(zip(h_day["hour"].astype(int), h_day["floating_count"].astype(int)))
+
+    # Step 2: Get timeseries shape for proportional distribution
     ts_day = daily_timeseries[daily_timeseries["date"] == date_str] if not daily_timeseries.empty and "date" in daily_timeseries.columns else pd.DataFrame()
+    ts_by_bin = {}
     if not ts_day.empty and "minute" in ts_day.columns and "floating_count" in ts_day.columns:
         ts_day = ts_day.copy()
-        ts_day["bin30"] = ts_day["minute"] // 30
-        fp_agg = ts_day.groupby("bin30")["floating_count"].max()
-        for b_idx, val in fp_agg.items():
-            if 0 <= b_idx < 48:
-                fp_by_bin[int(b_idx)] = int(val)
+        ts_day["bin_n"] = ts_day["minute"] // bin_minutes
+        ts_by_bin = ts_day.groupby("bin_n")["floating_count"].sum().to_dict()
 
-    # ── Visitors, dwell, device from sessions ──────────────────────────────
+    # Step 3: Distribute daily_fp across all bins proportionally
+    # Use hourly shape (further split by timeseries within each hour)
+    # This ensures: sum(all bins) ≈ daily_fp
+    fp_by_bin = {b: 0 for b in bins}
+
+    # Build weights for all bins using timeseries shape
+    all_weights = []
+    for b in bins:
+        all_weights.append(max(ts_by_bin.get(b, 0), 0))
+    total_weight = sum(all_weights)
+
+    use_daily_fp = daily_fp if daily_fp > 0 else sum(hourly_fp.values())
+
+    if total_weight > 0 and use_daily_fp > 0:
+        for b in bins:
+            fp_by_bin[b] = int(round(use_daily_fp * all_weights[b] / total_weight))
+    elif use_daily_fp > 0:
+        # Even distribution if no timeseries
+        per_bin = use_daily_fp // n_bins
+        for b in bins:
+            fp_by_bin[b] = per_bin
+
+    # ── Visitors: unique MACs from sessions per bin ────────────────────────
     v_by_bin = {b: 0 for b in bins}
     dwell_by_bin = {b: 0.0 for b in bins}
     ios_by_bin = {b: 0 for b in bins}
@@ -148,104 +187,12 @@ def _compute_30min_stats(
     sess_day = sessions[sessions["date"] == date_str] if not sessions.empty and "date" in sessions.columns else pd.DataFrame()
     if not sess_day.empty and "entry_time_index" in sess_day.columns:
         sess_day = sess_day.copy()
-        # entry_time_index * 10sec → minutes → 30min bin
-        sess_day["bin30"] = (sess_day["entry_time_index"] * TIME_UNIT_SECONDS // 60 // 30).astype(int).clip(0, 47)
-
-        v_counts = sess_day.groupby("bin30").size()
-        for b_idx, cnt in v_counts.items():
-            if 0 <= b_idx < 48:
-                v_by_bin[int(b_idx)] = int(cnt)
-
-        if "dwell_seconds" in sess_day.columns:
-            dwell_means = sess_day.groupby("bin30")["dwell_seconds"].mean()
-            for b_idx, val in dwell_means.items():
-                if 0 <= b_idx < 48:
-                    dwell_by_bin[int(b_idx)] = float(val)
-
-        if "device_type" in sess_day.columns:
-            dev_counts = sess_day.groupby(["bin30", "device_type"]).size().unstack(fill_value=0)
-            for b_idx in dev_counts.index:
-                if 0 <= b_idx < 48:
-                    apple = int(dev_counts.at[b_idx, DEVICE_TYPE_APPLE]) if DEVICE_TYPE_APPLE in dev_counts.columns else 0
-                    android = int(dev_counts.at[b_idx, DEVICE_TYPE_ANDROID]) if DEVICE_TYPE_ANDROID in dev_counts.columns else 0
-                    ios_by_bin[int(b_idx)] = apple
-                    android_by_bin[int(b_idx)] = android
-
-    # ── Assemble DataFrame ─────────────────────────────────────────────────
-    rows = []
-    for b in bins:
-        fp = fp_by_bin[b]
-        v = v_by_bin[b]
-        cvr = round(v / fp * 100, 1) if fp > 0 else 0.0
-        total_dev = ios_by_bin[b] + android_by_bin[b]
-        rows.append({
-            "bin_label": bin_labels[b],
-            "bin_idx": b,
-            "floating_count": fp,
-            "visitor_count": v,
-            "cvr_pct": cvr,
-            "dwell_sec_mean": round(dwell_by_bin[b], 1),
-            "ios_pct": round(100 * ios_by_bin[b] / total_dev, 1) if total_dev else 0.0,
-            "android_pct": round(100 * android_by_bin[b] / total_dev, 1) if total_dev else 0.0,
-        })
-    return pd.DataFrame(rows)
-
-
-def _compute_nmin_stats(
-    sessions: pd.DataFrame,
-    daily_timeseries: pd.DataFrame,
-    date_str: str,
-    bin_minutes: int = 5,
-) -> pd.DataFrame:
-    """
-    Compute N-minute-binned stats for a single date.
-
-    Parameters
-    ----------
-    bin_minutes : any divisor of 60 (5, 10, 15, 20, 30)
-
-    Returns DataFrame with (24*60/bin_minutes) rows.
-    """
-    n_bins = 24 * 60 // bin_minutes
-    bins = list(range(n_bins))
-    bin_labels = [
-        f"{(b * bin_minutes) // 60:02d}:{(b * bin_minutes) % 60:02d}"
-        for b in bins
-    ]
-
-    # ── Floating Population from timeseries (minute-level) ─────────────────
-    fp_by_bin = {b: 0 for b in bins}
-    ts_day = (
-        daily_timeseries[daily_timeseries["date"] == date_str]
-        if not daily_timeseries.empty and "date" in daily_timeseries.columns
-        else pd.DataFrame()
-    )
-    if not ts_day.empty and "minute" in ts_day.columns and "floating_count" in ts_day.columns:
-        ts_day = ts_day.copy()
-        ts_day["bin_n"] = ts_day["minute"] // bin_minutes
-        fp_agg = ts_day.groupby("bin_n")["floating_count"].max()
-        for b_idx, val in fp_agg.items():
-            if 0 <= b_idx < n_bins:
-                fp_by_bin[int(b_idx)] = int(val)
-
-    # ── Visitors, dwell, device from sessions ──────────────────────────────
-    v_by_bin = {b: 0 for b in bins}
-    dwell_by_bin = {b: 0.0 for b in bins}
-    ios_by_bin = {b: 0 for b in bins}
-    android_by_bin = {b: 0 for b in bins}
-
-    sess_day = (
-        sessions[sessions["date"] == date_str]
-        if not sessions.empty and "date" in sessions.columns
-        else pd.DataFrame()
-    )
-    if not sess_day.empty and "entry_time_index" in sess_day.columns:
-        sess_day = sess_day.copy()
         sess_day["bin_n"] = (
             sess_day["entry_time_index"] * TIME_UNIT_SECONDS // 60 // bin_minutes
         ).astype(int).clip(0, n_bins - 1)
 
-        v_counts = sess_day.groupby("bin_n").size()
+        # Unique visitor MACs per bin
+        v_counts = sess_day.groupby("bin_n")["mac_address"].nunique()
         for b_idx, cnt in v_counts.items():
             if 0 <= b_idx < n_bins:
                 v_by_bin[int(b_idx)] = int(cnt)
@@ -265,11 +212,11 @@ def _compute_nmin_stats(
                     ios_by_bin[int(b_idx)] = apple
                     android_by_bin[int(b_idx)] = android
 
-    # ── Assemble ───────────────────────────────────────────────────────────
+    # ── Assemble — guarantee FP >= Visitors ────────────────────────────────
     rows = []
     for b in bins:
-        fp = fp_by_bin[b]
         v = v_by_bin[b]
+        fp = max(fp_by_bin[b], v)  # safety: FP can never be less than visitors
         cvr = round(v / fp * 100, 1) if fp > 0 else 0.0
         total_dev = ios_by_bin[b] + android_by_bin[b]
         rows.append({
@@ -291,6 +238,7 @@ def hourly_stats_flexible(
     daily_timeseries: pd.DataFrame,
     dates: List[str],
     bin_minutes: int = 60,
+    daily_stats: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Compute time-binned stats across one or more dates, then average.
@@ -302,6 +250,7 @@ def hourly_stats_flexible(
     daily_timeseries : Minute-level timeseries (used for sub-hour bins)
     dates : List of date strings ('YYYY-MM-DD')
     bin_minutes : 5, 10, 15, 30, or 60
+    daily_stats : daily_stats DataFrame (for daily_fp lookup in sub-hour bins)
 
     Returns
     -------
@@ -314,15 +263,21 @@ def hourly_stats_flexible(
     frames = []
     for date_str in dates:
         if bin_minutes == 60:
-            # 60min: reuse existing function, add bin_label
+            # 60min: reuse existing hourly function (already validated)
             df = hourly_stats_for_date(daily_hourly, sessions, date_str)
             df["bin_label"] = df["hour"].apply(lambda h: f"{h:02d}:00")
             df["bin_idx"] = df["hour"]
-        elif bin_minutes == 30:
-            df = _compute_30min_stats(sessions, daily_timeseries, date_str)
         else:
-            # 5, 10, 15, 20 min bins
-            df = _compute_nmin_stats(sessions, daily_timeseries, date_str, bin_minutes)
+            # Sub-hourly: distribute daily FP proportionally across bins
+            d_fp = 0
+            if daily_stats is not None and not daily_stats.empty:
+                ds_row = daily_stats[daily_stats["date"].astype(str) == date_str]
+                if not ds_row.empty:
+                    d_fp = int(ds_row.iloc[0].get("floating_unique", 0))
+            df = _compute_subhour_stats(
+                sessions, daily_timeseries, daily_hourly,
+                date_str, bin_minutes=bin_minutes, daily_fp=d_fp,
+            )
         frames.append(df)
 
     if not frames:

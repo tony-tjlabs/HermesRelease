@@ -185,6 +185,7 @@ def _generate_report(
     """Generate report data and store in session state."""
     with st.spinner("Generating report..."):
         space_notes = st.session_state.get("current_space_notes", "")
+        report_lang = st.session_state.get("report_lang", "English")
         report_data = _prepare_report_data(daily_stats, period, space_notes)
 
         if not report_data:
@@ -307,16 +308,37 @@ def _prepare_report_data(daily_stats: pd.DataFrame, period: tuple, space_notes: 
     anomaly_dates = set(df.loc[fp_anomaly | cvr_anomaly, "date"].astype(str))
 
     total_v = df["visitor_count"].sum() or 1
-    short = df["short_dwell_count"].sum() if "short_dwell_count" in df.columns else 0
-    medium = df["medium_dwell_count"].sum() if "medium_dwell_count" in df.columns else 0
-    long = df["long_dwell_count"].sum() if "long_dwell_count" in df.columns else 0
-    quality_v = (medium + long) if (medium + long) else df[qv].sum() if qv in df.columns else 0
     fp_total = df["floating_unique"].sum() or 1
 
+    # 5분류 체류시간 집계
+    d_1_3 = df["dwell_1_3min_count"].sum() if "dwell_1_3min_count" in df.columns else 0
+    d_3_6 = df["dwell_3_6min_count"].sum() if "dwell_3_6min_count" in df.columns else 0
+    d_6_10 = df["dwell_6_10min_count"].sum() if "dwell_6_10min_count" in df.columns else 0
+    d_10_15 = df["dwell_10_15min_count"].sum() if "dwell_10_15min_count" in df.columns else 0
+    d_15plus = df["dwell_15plus_count"].sum() if "dwell_15plus_count" in df.columns else 0
+
+    # 3분류 하위호환 (deprecated columns)
+    short = df["short_dwell_count"].sum() if "short_dwell_count" in df.columns else d_1_3
+    medium = df["medium_dwell_count"].sum() if "medium_dwell_count" in df.columns else (d_3_6 + d_6_10)
+    long = df["long_dwell_count"].sum() if "long_dwell_count" in df.columns else (d_10_15 + d_15plus)
+
+    # Quality = 3분 이상 체류
+    quality_v = d_3_6 + d_6_10 + d_10_15 + d_15plus
+    if quality_v == 0:
+        quality_v = df[qv].sum() if qv in df.columns else 0
+
     funnel = {
+        # 5분류 (신규)
+        "1_3min_pct": d_1_3 / total_v * 100 if total_v else 0,
+        "3_6min_pct": d_3_6 / total_v * 100 if total_v else 0,
+        "6_10min_pct": d_6_10 / total_v * 100 if total_v else 0,
+        "10_15min_pct": d_10_15 / total_v * 100 if total_v else 0,
+        "15plus_pct": d_15plus / total_v * 100 if total_v else 0,
+        # 3분류 (하위호환)
         "short_pct": short / total_v * 100 if total_v else 0,
         "medium_pct": medium / total_v * 100 if total_v else 0,
         "long_pct": long / total_v * 100 if total_v else 0,
+        # 공통 지표
         "quality_visitor_ratio": quality_v / total_v * 100 if total_v else 0,
         "long_ratio": long / total_v * 100 if total_v else 0,
         "quality_cvr": quality_v / fp_total * 100 if fp_total else 0,
@@ -381,24 +403,38 @@ def _prepare_report_data(daily_stats: pd.DataFrame, period: tuple, space_notes: 
 # ── Chart Building ───────────────────────────────────────────────────────────
 
 def _build_dwell_funnel_chart(report_data: dict):
-    """Donut chart: Short / Medium / Long dwell ratio for the week."""
+    """Donut chart: 5-tier dwell distribution for the week.
+
+    Colors:
+      - 1~3min: #64748b (slate gray)
+      - 3~6min: #4A90D9 (blue)
+      - 6~10min: #64ffda (teal)
+      - 10~15min: #c49a3a (gold)
+      - 15+min: #d97706 (amber)
+    """
     funnel = report_data.get("funnel", {})
-    short = funnel.get("short_pct", 0) or 0
-    medium = funnel.get("medium_pct", 0) or 0
-    long_ = funnel.get("long_pct", 0) or 0
-    if short == 0 and medium == 0 and long_ == 0:
+    d_1_3 = funnel.get("1_3min_pct", 0) or 0
+    d_3_6 = funnel.get("3_6min_pct", 0) or 0
+    d_6_10 = funnel.get("6_10min_pct", 0) or 0
+    d_10_15 = funnel.get("10_15min_pct", 0) or 0
+    d_15plus = funnel.get("15plus_pct", 0) or 0
+
+    if d_1_3 == 0 and d_3_6 == 0 and d_6_10 == 0 and d_10_15 == 0 and d_15plus == 0:
         return None
 
+    # Quality = 3분 이상 체류
+    quality_pct = d_3_6 + d_6_10 + d_10_15 + d_15plus
+
     fig = go.Figure(go.Pie(
-        labels=["Short (<3min)", "Medium (3-10min)", "Long (10min+)"],
-        values=[short, medium, long_],
+        labels=["1-3min", "3-6min", "6-10min", "10-15min", "15+min"],
+        values=[d_1_3, d_3_6, d_6_10, d_10_15, d_15plus],
         hole=0.55,
-        marker_colors=[SLATE_GRAY, FP_COLOR, VISITOR_COLOR],
+        marker_colors=["#64748b", "#4A90D9", "#64ffda", "#c49a3a", "#d97706"],
         textinfo="label+percent",
-        textfont_size=10,
+        textfont_size=9,
     ))
     fig.add_annotation(
-        text=f"Quality<br>{medium + long_:.1f}%",
+        text=f"Quality<br>{quality_pct:.1f}%",
         x=0.5, y=0.5, showarrow=False,
         font=dict(size=13, color="#ccd6f6", family="Helvetica"),
     )
@@ -483,11 +519,26 @@ def _build_report_charts(report_data: dict) -> dict:
         # apply_theme already applies dark palette
         figs["traffic"] = fig_t
 
-    if not df.empty and all(c in df.columns for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count", qc]):
+    # 5분류 스택 바 차트 (우선) or 3분류 하위호환
+    has_5tier = all(c in df.columns for c in ["dwell_1_3min_count", "dwell_3_6min_count", "dwell_6_10min_count", "dwell_10_15min_count", "dwell_15plus_count"])
+    has_3tier = all(c in df.columns for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count"])
+
+    if not df.empty and (has_5tier or has_3tier) and qc in df.columns:
         fig_f = go.Figure()
-        fig_f.add_trace(go.Bar(x=df["date"], y=df["short_dwell_count"], name="Short (<3min)", marker_color=SLATE_GRAY))
-        fig_f.add_trace(go.Bar(x=df["date"], y=df["medium_dwell_count"], name="Medium (3-10min)", marker_color=FP_COLOR))
-        fig_f.add_trace(go.Bar(x=df["date"], y=df["long_dwell_count"], name="Long (10min+)", marker_color=VISITOR_COLOR))
+
+        if has_5tier:
+            # 5분류 스택 바 차트
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["dwell_1_3min_count"], name="1-3min", marker_color="#64748b"))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["dwell_3_6min_count"], name="3-6min", marker_color="#4A90D9"))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["dwell_6_10min_count"], name="6-10min", marker_color="#64ffda"))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["dwell_10_15min_count"], name="10-15min", marker_color="#c49a3a"))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["dwell_15plus_count"], name="15+min", marker_color="#d97706"))
+        else:
+            # 3분류 하위호환
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["short_dwell_count"], name="Short (<3min)", marker_color=SLATE_GRAY))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["medium_dwell_count"], name="Medium (3-10min)", marker_color=FP_COLOR))
+            fig_f.add_trace(go.Bar(x=df["date"], y=df["long_dwell_count"], name="Long (10min+)", marker_color=VISITOR_COLOR))
+
         fig_f.update_layout(barmode="stack", height=320, xaxis_title="Date", yaxis_title="Count")
         fig_f.add_trace(go.Scatter(
             x=df["date"], y=df[qc], name="Quality CVR (%)", yaxis="y2",
@@ -565,17 +616,21 @@ def _render_report_preview(report_data: dict, ai_insight: str, chart_figs: dict)
     if "traffic" in chart_figs:
         st.plotly_chart(chart_figs["traffic"], use_container_width=True)
 
-    # Section 3: Dwell Funnel
+    # Section 3: Dwell Funnel (5-tier)
     st.markdown(
-        '<div class="report-section-title">3. Dwell Funnel</div>',
+        '<div class="report-section-title">3. Dwell Funnel (5-tier)</div>',
         unsafe_allow_html=True,
     )
     funnel = report_data.get("funnel", {})
-    fc1, fc2, fc3, fc4 = st.columns(4)
-    fc1.metric("Short (<3min)", f"{funnel.get('short_pct', 0):.1f}%")
-    fc2.metric("Medium (3-10min)", f"{funnel.get('medium_pct', 0):.1f}%")
-    fc3.metric("Long (10min+)", f"{funnel.get('long_pct', 0):.1f}%")
-    fc4.metric("Quality CVR", f"{funnel.get('quality_cvr', 0):.1f}%")
+    # 5분류 메트릭 표시 (2행 3열)
+    fc1, fc2, fc3 = st.columns(3)
+    fc1.metric("1-3min", f"{funnel.get('1_3min_pct', 0):.1f}%")
+    fc2.metric("3-6min", f"{funnel.get('3_6min_pct', 0):.1f}%")
+    fc3.metric("6-10min", f"{funnel.get('6_10min_pct', 0):.1f}%")
+    fc4, fc5, fc6 = st.columns(3)
+    fc4.metric("10-15min", f"{funnel.get('10_15min_pct', 0):.1f}%")
+    fc5.metric("15+min", f"{funnel.get('15plus_pct', 0):.1f}%")
+    fc6.metric("Quality CVR", f"{funnel.get('quality_cvr', 0):.1f}%")
     if "funnel" in chart_figs:
         st.plotly_chart(chart_figs["funnel"], use_container_width=True)
     if "dwell_funnel" in chart_figs:

@@ -8,12 +8,17 @@ Two modes in one file:
 Simplified from v2: removed redundant sections, enhanced AI prompts
 with advertising/location/operations perspectives.
 Dark theme, metric-card/section-header/ai-comment CSS classes.
+
+v3.1 (2026-04-05): Reactivity optimizations + AI full-data support
+  - Expanded @st.cache_data coverage for hourly calculations
+  - Reduced DataFrame.copy() calls to necessary cases only
+  - AI now receives full available data (up to 30 days) instead of 14 days
 """
 from __future__ import annotations
 
 import json
 import re
-from typing import Optional
+from typing import Optional, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -29,6 +34,9 @@ from src.ui.helpers import (
 )
 from src.ai import call_claude
 from config import REGISTERED_SECTORS
+
+# Maximum days to include in AI prompt (to avoid token overflow)
+_AI_MAX_DAYS = 30
 
 
 # -- Color Palette ---------------------------------------------------------
@@ -56,6 +64,44 @@ def _get_sector_context(space_name: str) -> str:
 @st.cache_data(show_spinner=False)
 def _cached_wow(daily_stats: pd.DataFrame, days_per_week: int = 7) -> dict:
     return compute_week_over_week(daily_stats, days_per_week=days_per_week)
+
+
+@st.cache_data(show_spinner=False, ttl=600)
+def _cached_hourly_stats(
+    daily_hourly_json: str,
+    sessions_json: str,
+    daily_timeseries_json: str,
+    dates: Tuple[str, ...],
+    bin_minutes: int,
+    daily_stats_json: str,
+) -> pd.DataFrame:
+    """Cached wrapper for hourly_stats_flexible to avoid recomputation on reruns."""
+    daily_hourly = pd.read_json(daily_hourly_json, orient="split") if daily_hourly_json else pd.DataFrame()
+    sessions = pd.read_json(sessions_json, orient="split") if sessions_json else pd.DataFrame()
+    daily_timeseries = pd.read_json(daily_timeseries_json, orient="split") if daily_timeseries_json else pd.DataFrame()
+    daily_stats = pd.read_json(daily_stats_json, orient="split") if daily_stats_json else None
+    return hourly_stats_flexible(
+        daily_hourly, sessions, daily_timeseries,
+        list(dates), bin_minutes=bin_minutes,
+        daily_stats=daily_stats,
+    )
+
+
+def _get_hourly_stats_cached(
+    daily_hourly: pd.DataFrame,
+    sessions: pd.DataFrame,
+    daily_timeseries: pd.DataFrame,
+    dates: list,
+    bin_minutes: int,
+    daily_stats: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Helper that serializes DataFrames for caching."""
+    # Convert to JSON for hashable cache key
+    dh_json = daily_hourly.to_json(orient="split", date_format="iso") if not daily_hourly.empty else ""
+    sess_json = sessions.to_json(orient="split", date_format="iso") if not sessions.empty else ""
+    ts_json = daily_timeseries.to_json(orient="split", date_format="iso") if not daily_timeseries.empty else ""
+    ds_json = daily_stats.to_json(orient="split", date_format="iso") if daily_stats is not None and not daily_stats.empty else ""
+    return _cached_hourly_stats(dh_json, sess_json, ts_json, tuple(dates), bin_minutes, ds_json)
 
 
 
@@ -190,7 +236,8 @@ def _render_daily(
 
     fp_val = int(row.get("floating_unique", 0))
     v_val = int(row.get("visitor_count", 0))
-    cvr_val = row.get("quality_cvr" if has_quality else "conversion_rate", 0)
+    cvr_val = float(row.get("conversion_rate", 0))
+    q_cvr_val = float(row.get("quality_cvr", 0)) if has_quality else None
     if has_median:
         dwell_sec = row.get("dwell_median_seconds", 0)
     else:
@@ -199,15 +246,29 @@ def _render_daily(
 
     cols = st.columns(4)
     with cols[0]:
-        render_metric_card("Floating Population", f"{fp_val:,}", "Unique MACs near store")
+        render_metric_card("Floating Population", f"{fp_val:,}", "Passersby near store")
     with cols[1]:
-        render_metric_card("Visitors", f"{v_val:,}", "Entered store interior")
+        render_metric_card("Visitors", f"{v_val:,}", "Entered store")
     with cols[2]:
-        cvr_label = "Quality CVR" if has_quality else "CVR"
-        render_metric_card(cvr_label, f"{cvr_val:.1f}%", "Visitors / FP")
+        cvr_sub = f"Quality CVR: {q_cvr_val:.1f}%" if q_cvr_val is not None else ""
+        render_metric_card("CVR", f"{cvr_val:.1f}%", cvr_sub)
     with cols[3]:
         dwell_label = "Median Dwell" if has_median else "Avg Dwell"
         render_metric_card(dwell_label, f"{mm}m {ss}s", "Time inside store")
+
+    # -- Metric Definitions --
+    with st.expander("Metric Definitions", expanded=False):
+        st.markdown("""
+| Metric | Definition |
+|--------|-----------|
+| **FP (Floating Population)** | 매장 주변에서 BLE 신호가 감지된 고유 디바이스 수. 입구 센서 + 내부 센서 합집합. 지나가는 사람과 들어온 사람 모두 포함. |
+| **Visitors** | 3중 필터를 통과한 실제 매장 방문자. ① 내부 센서에서 세션 구성 → ② 최소 체류시간 이상 → ③ 신호의 80% 이상이 RSSI 임계값 통과. |
+| **CVR (Conversion Rate)** | Visitors ÷ FP × 100%. 유동인구 중 실제 매장에 들어온 비율. 매장의 유인력(Pull Power) 지표. |
+| **Quality CVR** | (중기+장기 체류 방문자) ÷ FP × 100%. 짧은 방문(단기)을 제외하고 의미 있는 체류를 한 고객만 카운트. 매장의 진짜 매력도 지표. |
+| **Dwell Time** | 방문 세션의 입장~퇴장 시간. 퇴장 시각은 마지막 신호 수신 기준 (back-dating). 체류 품질을 나타냄. |
+| **Short / Medium / Long** | 체류시간 세그먼트. 매장 유형별 기준이 다름 (편의점: <2분/2~5분/5분+ / 스포츠매장: <3분/3~10분/10분+). |
+""")
+
 
     # -- Intraday Traffic Pattern --
     render_section_header("Intraday Traffic Pattern")
@@ -225,21 +286,23 @@ def _render_daily(
     bin_minutes = bin_options[bin_label]
 
     if not daily_hourly.empty:
-        h_df = hourly_stats_flexible(
+        h_df = _get_hourly_stats_cached(
             daily_hourly, sessions, daily_timeseries,
             [date_str], bin_minutes=bin_minutes,
+            daily_stats=daily_stats,
         )
 
         if not h_df.empty:
-            # Filter by time_range
-            h_df_filtered = h_df.copy()
+            # Filter by time_range (no copy needed - filtering creates new DataFrame)
             if time_range:
                 start_bin = time_range[0] * 60 // bin_minutes
                 end_bin = time_range[1] * 60 // bin_minutes
-                h_df_filtered = h_df_filtered[
-                    (h_df_filtered["bin_idx"] >= start_bin)
-                    & (h_df_filtered["bin_idx"] < end_bin)
+                h_df_filtered = h_df[
+                    (h_df["bin_idx"] >= start_bin)
+                    & (h_df["bin_idx"] < end_bin)
                 ]
+            else:
+                h_df_filtered = h_df
 
             # Peak hours
             peaks = identify_peak_hours(h_df_filtered, metric="visitor_count", top_n=3)
@@ -289,50 +352,50 @@ def _render_daily(
                 dtick=tick_interval,
             ))
             st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                f"CVR in chart = visitors ÷ FP per time bin. "
+                f"Daily CVR ({cvr_val:.1f}%) uses full-day unique FP ({fp_val:,}), "
+                f"so per-bin CVR appears higher due to the same person being counted in multiple bins."
+            )
     else:
         st.caption("No traffic data available for this date.")
 
-    # -- Dwell Funnel --
+    # -- Dwell Funnel (5-tier from sessions) --
     render_section_header("Dwell Time Distribution")
 
-    has_funnel = all(
-        c in row.index
-        for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count"]
-    )
-
-    if has_funnel:
-        short = int(row.get("short_dwell_count", 0))
-        medium = int(row.get("medium_dwell_count", 0))
-        long_ = int(row.get("long_dwell_count", 0))
-        total_v = short + medium + long_ or 1
-        quality_count = medium + long_
+    # Compute 5-tier dwell from sessions directly
+    s_day = sessions[sessions["date"].astype(str) == date_str] if "date" in sessions.columns else sessions
+    if not s_day.empty and "dwell_seconds" in s_day.columns:
+        d = s_day["dwell_seconds"]
+        total_v = len(d) or 1
+        dwell_tiers = [
+            ("1~3 min",   int(((d >= 60) & (d < 180)).sum()),   "#64748b"),
+            ("3~6 min",   int(((d >= 180) & (d < 360)).sum()),  FP_COLOR),
+            ("6~10 min",  int(((d >= 360) & (d < 600)).sum()),  VISITOR_COLOR),
+            ("10~15 min", int(((d >= 600) & (d < 900)).sum()),  GOLD),
+            ("15+ min",   int((d >= 900).sum()),                AMBER),
+        ]
+        # Quality = 3min 이상 체류
+        quality_count = sum(c for _, c, _ in dwell_tiers[1:])
         quality_pct = quality_count / total_v * 100
 
-        fc2 = st.columns(4)
-        with fc2[0]:
-            render_metric_card("Short (<3min)", f"{short / total_v * 100:.1f}%", f"{short} visitors")
-        with fc2[1]:
-            render_metric_card("Medium (3-10min)", f"{medium / total_v * 100:.1f}%", f"{medium} visitors")
-        with fc2[2]:
-            render_metric_card("Long (10min+)", f"{long_ / total_v * 100:.1f}%", f"{long_} visitors")
-        with fc2[3]:
-            render_metric_card("Quality Visitors", f"{quality_pct:.1f}%", f"{quality_count} of {total_v}")
+        # KPI cards
+        fc2 = st.columns(5)
+        for i, (label, count, _) in enumerate(dwell_tiers):
+            with fc2[i]:
+                pct = count / total_v * 100
+                render_metric_card(label, f"{pct:.1f}%", f"{count}")
 
-        # Dwell funnel bar
-        dwell_data = pd.DataFrame([
-            {"Category": "Short (<3min)", "Count": short, "Color": SLATE_GRAY},
-            {"Category": "Medium (3-10min)", "Count": medium, "Color": FP_COLOR},
-            {"Category": "Long (10min+)", "Count": long_, "Color": VISITOR_COLOR},
-        ])
+        st.caption(f"Quality Visitors (3min+): {quality_count} of {total_v} ({quality_pct:.1f}%)")
+
+        # Bar chart
         fig = go.Figure()
-        for _, r in dwell_data.iterrows():
-            pct = r["Count"] / total_v * 100
+        for label, count, color in dwell_tiers:
+            pct = count / total_v * 100
             fig.add_trace(go.Bar(
-                x=[r["Category"]],
-                y=[r["Count"]],
-                name=r["Category"],
-                marker_color=r["Color"],
-                text=[f"{r['Count']} ({pct:.0f}%)"],
+                x=[label], y=[count],
+                name=label, marker_color=color,
+                text=[f"{count} ({pct:.0f}%)"],
                 textposition="outside",
                 textfont=dict(color="#ccd6f6", size=11),
             ))
@@ -433,8 +496,10 @@ def _run_daily_ai(
     time_range: tuple[int, int],
     lang: str = "English",
 ) -> None:
-    """Run AI analysis for daily mode."""
+    """Run AI analysis for daily mode.
 
+    Now includes full available data (up to 30 days) for better AI context.
+    """
     has_quality = "quality_cvr" in daily_stats.columns
     has_median = "dwell_median_seconds" in daily_stats.columns
 
@@ -449,12 +514,19 @@ def _run_daily_ai(
         "has_quality": has_quality,
     }
 
-    # Add funnel data
-    if "short_dwell_count" in row.index:
-        total_v = int(row.get("visitor_count", 1)) or 1
-        metrics["short_pct"] = int(row.get("short_dwell_count", 0)) / total_v * 100
-        metrics["medium_pct"] = int(row.get("medium_dwell_count", 0)) / total_v * 100
-        metrics["long_pct"] = int(row.get("long_dwell_count", 0)) / total_v * 100
+    # Add 5-tier dwell from sessions
+    sessions = loader.get_sessions_stitched()
+    if sessions.empty:
+        sessions = loader.get_sessions_all()
+    s_day_ai = sessions[sessions["date"].astype(str) == date_str] if not sessions.empty and "date" in sessions.columns else sessions
+    if not s_day_ai.empty and "dwell_seconds" in s_day_ai.columns:
+        d_ai = s_day_ai["dwell_seconds"]
+        total_v_ai = len(d_ai) or 1
+        metrics["dwell_1_3min_pct"] = round(((d_ai >= 60) & (d_ai < 180)).sum() / total_v_ai * 100, 1)
+        metrics["dwell_3_6min_pct"] = round(((d_ai >= 180) & (d_ai < 360)).sum() / total_v_ai * 100, 1)
+        metrics["dwell_6_10min_pct"] = round(((d_ai >= 360) & (d_ai < 600)).sum() / total_v_ai * 100, 1)
+        metrics["dwell_10_15min_pct"] = round(((d_ai >= 600) & (d_ai < 900)).sum() / total_v_ai * 100, 1)
+        metrics["dwell_15plus_pct"] = round((d_ai >= 900).sum() / total_v_ai * 100, 1)
 
     # Add day type / weather (including temperature & precipitation)
     if "day_type" in row.index:
@@ -468,15 +540,41 @@ def _run_daily_ai(
     if "precipitation" in row.index:
         metrics["precipitation"] = float(row.get("precipitation", 0))
 
-    # Recent 14-day context table (for AI to compare against)
+    # Full available data context (up to _AI_MAX_DAYS)
     qc = "quality_cvr" if has_quality else "conversion_rate"
     dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
     sorted_stats = daily_stats.sort_values("date")
-    recent_14 = sorted_stats.tail(14)
+    n_total = len(sorted_stats)
 
-    if len(recent_14) >= 2:
+    # Provide full data summary for AI
+    metrics["total_days_available"] = n_total
+    metrics["all_period_avg_fp"] = float(sorted_stats["floating_unique"].mean())
+    metrics["all_period_avg_v"] = float(sorted_stats["visitor_count"].mean())
+    metrics["all_period_avg_cvr"] = float(sorted_stats[qc].mean())
+
+    # Day-type summary for full period
+    if "day_type" in sorted_stats.columns:
+        daytype_summary = sorted_stats.groupby("day_type").agg({
+            "floating_unique": "mean",
+            "visitor_count": "mean",
+            qc: "mean",
+        }).round(1).to_dict(orient="index")
+        metrics["daytype_summary"] = daytype_summary
+
+    # Weather summary for full period
+    if "weather" in sorted_stats.columns:
+        weather_summary = sorted_stats.groupby("weather").agg({
+            "floating_unique": "mean",
+            "visitor_count": "mean",
+            qc: "mean",
+        }).round(1).to_dict(orient="index")
+        metrics["weather_summary"] = weather_summary
+
+    # Recent days table: up to _AI_MAX_DAYS (30)
+    recent_days = sorted_stats.tail(_AI_MAX_DAYS)
+    if len(recent_days) >= 2:
         recent_rows = []
-        for _, r in recent_14.iterrows():
+        for _, r in recent_days.iterrows():
             entry = {
                 "date": str(r["date"]),
                 "fp": int(r.get("floating_unique", 0)),
@@ -491,10 +589,12 @@ def _run_daily_ai(
             if "temp_max" in r.index:
                 entry["temp"] = f"{r.get('temp_min', 0):.0f}~{r.get('temp_max', 0):.0f}"
             recent_rows.append(entry)
-        metrics["recent_14_days"] = recent_rows
-        metrics["period_avg_fp"] = float(recent_14["floating_unique"].mean())
-        metrics["period_avg_v"] = float(recent_14["visitor_count"].mean())
-        metrics["period_avg_cvr"] = float(recent_14[qc].mean())
+        metrics["history_days"] = recent_rows
+        metrics["history_count"] = len(recent_rows)
+        # Period averages for the displayed history
+        metrics["period_avg_fp"] = float(recent_days["floating_unique"].mean())
+        metrics["period_avg_v"] = float(recent_days["visitor_count"].mean())
+        metrics["period_avg_cvr"] = float(recent_days[qc].mean())
 
     space_notes = st.session_state.get("current_space_notes", "")
     with st.spinner("AI is analyzing..."):
@@ -529,16 +629,35 @@ def _render_comparison(
 
     st.markdown("## Period Comparison Analysis")
 
-    ds = daily_stats.sort_values("date")
+    ds = daily_stats.sort_values("date").copy()
     has_quality = "quality_cvr" in ds.columns
     has_median = "dwell_median_seconds" in ds.columns
     qc = "quality_cvr" if has_quality else "conversion_rate"
     dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
 
+    # -- Build x-axis labels: "03-29(Sat)☀️" --
+    _DOW = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+    _WICON = {"Sunny": "☀️", "Rain": "🌧", "Snow": "❄️"}
+
+    def _x_label(row):
+        try:
+            dt = pd.to_datetime(row["date"])
+            dow = _DOW.get(dt.dayofweek, "")
+            lbl = f"{dt.strftime('%m-%d')}({dow})"
+            if "weather" in row.index:
+                icon = _WICON.get(str(row.get("weather", "")), "")
+                if icon:
+                    lbl += icon
+            return lbl
+        except Exception:
+            return str(row["date"])
+
+    ds["x_label"] = ds.apply(_x_label, axis=1)
+
     # -- KPI summary cards (first) --
     avg_fp = ds["floating_unique"].mean()
     avg_v = ds["visitor_count"].mean()
-    avg_cvr = ds[qc].mean()
+    avg_cvr = ds["conversion_rate"].mean()  # Use standard CVR for consistency
     avg_dwell = ds[dwell_col].mean()
     mm, ss = int(avg_dwell) // 60, int(avg_dwell) % 60
 
@@ -550,9 +669,21 @@ def _render_comparison(
     with kpi_cols[1]:
         render_metric_card("Avg Daily Visitors", f"{avg_v:,.0f}", "")
     with kpi_cols[2]:
-        render_metric_card("Avg CVR", f"{avg_cvr:.1f}%", "")
+        q_cvr_str = f"Quality: {ds[qc].mean():.1f}%" if has_quality else ""
+        render_metric_card("Avg CVR", f"{avg_cvr:.1f}%", q_cvr_str)
     with kpi_cols[3]:
         render_metric_card("Avg Dwell", f"{mm}m {ss}s", "")
+
+    with st.expander("Metric Definitions", expanded=False):
+        st.markdown("""
+| Metric | Definition |
+|--------|-----------|
+| **FP (Floating Population)** | 매장 주변에서 감지된 고유 디바이스 수. 지나가는 사람 + 들어온 사람 모두 포함. |
+| **Visitors** | 3중 필터(세션 구성 + 최소 체류 + 80% RSSI 통과)를 통과한 실제 방문자. |
+| **CVR** | Visitors ÷ FP × 100%. 유동인구 대비 실제 입장 비율. |
+| **Quality CVR** | (중기+장기 체류 방문자) ÷ FP × 100%. 의미 있는 체류를 한 고객만 카운트. |
+| **Dwell Time** | 입장~퇴장 시간. 체류 품질을 나타내는 핵심 지표. |
+""")
 
     # -- WoW Comparison --
     if len(ds) >= 14:
@@ -582,57 +713,103 @@ def _render_comparison(
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=ds["date"].astype(str), y=ds["floating_unique"],
+        x=ds["x_label"], y=ds["floating_unique"],
         name="Floating Pop",
         line=dict(color=FP_COLOR, width=2),
         mode="lines+markers",
     ))
     fig.add_trace(go.Scatter(
-        x=ds["date"].astype(str), y=ds["visitor_count"],
+        x=ds["x_label"], y=ds["visitor_count"],
         name="Visitors",
         line=dict(color=VISITOR_COLOR, width=2),
         mode="lines+markers",
+        yaxis="y2",
     ))
-    fig.update_layout(**make_plotly_layout("FP & Visitors Over Time"))
+    layout = make_plotly_layout("FP & Visitors Over Time")
+    layout["yaxis"] = dict(
+        title=dict(text="Floating Pop", font=dict(color=FP_COLOR)),
+        gridcolor="#1a2035", zerolinecolor="#1a2035",
+        tickfont=dict(color=FP_COLOR),
+    )
+    layout["yaxis2"] = dict(
+        title=dict(text="Visitors", font=dict(color=VISITOR_COLOR)),
+        overlaying="y", side="right",
+        gridcolor="#1a2035", zerolinecolor="#1a2035",
+        tickfont=dict(color=VISITOR_COLOR),
+    )
+    fig.update_layout(**layout)
     st.plotly_chart(fig, use_container_width=True)
 
     # -- CVR Trend --
     render_section_header("CVR Trend")
 
     fig_cvr = go.Figure()
+    # Use conversion_rate (visitors/FP) — consistent with Intraday chart
+    cvr_col = "conversion_rate"
     fig_cvr.add_trace(go.Scatter(
-        x=ds["date"].astype(str), y=ds[qc],
+        x=ds["x_label"], y=ds[cvr_col],
         name="CVR (%)",
         line=dict(color=AMBER, width=2.5),
         mode="lines+markers",
         fill="tozeroy",
         fillcolor="rgba(217,119,6,0.1)",
     ))
-    fig_cvr.update_layout(**make_plotly_layout("Conversion Rate (%)", height=300))
+    # Also show Quality CVR if available
+    if has_quality:
+        fig_cvr.add_trace(go.Scatter(
+            x=ds["x_label"], y=ds["quality_cvr"],
+            name="Quality CVR (%)",
+            line=dict(color=GOLD, width=1.5, dash="dash"),
+            mode="lines+markers",
+        ))
+    fig_cvr.update_layout(**make_plotly_layout("CVR (%) — solid: All Visitors, dashed: Quality", height=300))
     st.plotly_chart(fig_cvr, use_container_width=True)
 
     # -- Device Mix Trend --
     _render_device_mix_comparison(loader)
 
-    # -- Dwell Trend --
-    has_funnel = all(c in ds.columns for c in ["short_dwell_count", "medium_dwell_count", "long_dwell_count"])
-    if has_funnel:
+    # -- Dwell Trend (5-tier from sessions) --
+    sessions = loader.get_sessions_stitched()
+    if sessions.empty:
+        sessions = loader.get_sessions_all()
+
+    if not sessions.empty and "dwell_seconds" in sessions.columns and "date" in sessions.columns:
         render_section_header("Dwell Distribution Over Time")
+
+        _TIERS = [
+            ("1~3min",   60,  180, "#64748b"),
+            ("3~6min",  180,  360, FP_COLOR),
+            ("6~10min", 360,  600, VISITOR_COLOR),
+            ("10~15min",600,  900, GOLD),
+            ("15+min",  900, 99999, AMBER),
+        ]
+
+        # Compute per-date tier counts
+        dwell_rows = []
+        for date_val in ds["date"].values:
+            s_d = sessions[sessions["date"].astype(str) == str(date_val)]
+            d = s_d["dwell_seconds"] if not s_d.empty else pd.Series(dtype=float)
+            entry = {"date": str(date_val)}
+            for label, lo, hi, _ in _TIERS:
+                entry[label] = int(((d >= lo) & (d < hi)).sum())
+            dwell_rows.append(entry)
+        dwell_df = pd.DataFrame(dwell_rows)
+        # Merge x_label
+        dwell_df = dwell_df.merge(ds[["date", "x_label"]].astype(str), on="date", how="left")
+
         fig_dwell = go.Figure()
-        fig_dwell.add_trace(go.Bar(
-            x=ds["date"].astype(str), y=ds["short_dwell_count"],
-            name="Short (<3min)", marker_color=SLATE_GRAY,
-        ))
-        fig_dwell.add_trace(go.Bar(
-            x=ds["date"].astype(str), y=ds["medium_dwell_count"],
-            name="Medium (3-10min)", marker_color=FP_COLOR,
-        ))
-        fig_dwell.add_trace(go.Bar(
-            x=ds["date"].astype(str), y=ds["long_dwell_count"],
-            name="Long (10min+)", marker_color=VISITOR_COLOR,
-        ))
-        layout = make_plotly_layout("Dwell Breakdown", height=380)
+        for label, _, _, color in _TIERS:
+            fig_dwell.add_trace(go.Bar(
+                x=dwell_df["x_label"], y=dwell_df[label],
+                name=label, marker_color=color,
+            ))
+        layout = make_plotly_layout("Dwell Breakdown (Visitors Only)", height=380)
         layout["barmode"] = "stack"
+        layout["legend"] = dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            font=dict(size=11, color="#ccd6f6"),
+            traceorder="normal",  # 1~3min first → 15+min last
+        )
         fig_dwell.update_layout(**layout)
         st.plotly_chart(fig_dwell, use_container_width=True)
 
@@ -891,7 +1068,10 @@ def _get_sector_behavior_context(space_name: str) -> str:
 
 
 def _build_daily_ai_prompt(metrics: dict) -> str:
-    """Build user prompt for daily AI analysis with 3-section structure."""
+    """Build user prompt for daily AI analysis with 3-section structure.
+
+    Enhanced to include full available history (up to 30 days) with period summaries.
+    """
     dwell_min = metrics.get("dwell_sec", 0) / 60
     space_name = metrics.get("space_name", "Unknown")
 
@@ -907,22 +1087,57 @@ def _build_daily_ai_prompt(metrics: dict) -> str:
         f"- Dwell Time (median): {dwell_min:.1f} min",
     ]
 
-    if "short_pct" in metrics:
+    if "dwell_1_3min_pct" in metrics:
         lines.extend([
             "",
-            "[Dwell Breakdown]",
-            f"- Short (<3min): {metrics['short_pct']:.1f}%",
-            f"- Medium (3-10min): {metrics['medium_pct']:.1f}%",
-            f"- Long (10min+): {metrics['long_pct']:.1f}%",
+            "[Dwell Breakdown (visitors only, min 60s filter applied)]",
+            f"- 1~3 min: {metrics['dwell_1_3min_pct']}%",
+            f"- 3~6 min: {metrics['dwell_3_6min_pct']}%",
+            f"- 6~10 min: {metrics['dwell_6_10min_pct']}%",
+            f"- 10~15 min: {metrics['dwell_10_15min_pct']}%",
+            f"- 15+ min: {metrics['dwell_15plus_pct']}%",
+            "Note: MAC randomization limits long-stay tracking. 15min+ may be underestimated.",
         ])
 
-    # Recent 14-day history for comparison context
-    recent_days = metrics.get("recent_14_days", [])
-    if recent_days:
-        lines.extend(["", "[Recent History — compare today against these]"])
+    # Full period summary (all available data)
+    n_total = metrics.get("total_days_available", 0)
+    if n_total > 0:
+        lines.extend([
+            "",
+            f"[Full Period Summary — {n_total} days total]",
+            f"- Overall Avg FP: {metrics.get('all_period_avg_fp', 0):.0f}",
+            f"- Overall Avg Visitors: {metrics.get('all_period_avg_v', 0):.0f}",
+            f"- Overall Avg CVR: {metrics.get('all_period_avg_cvr', 0):.1f}%",
+        ])
+
+    # Day-type summary
+    daytype_summary = metrics.get("daytype_summary", {})
+    if daytype_summary:
+        lines.extend(["", "[By Day Type — Full Period]"])
+        for dt, vals in daytype_summary.items():
+            fp_val = vals.get("floating_unique", 0)
+            v_val = vals.get("visitor_count", 0)
+            cvr_val = vals.get("quality_cvr", vals.get("conversion_rate", 0))
+            lines.append(f"  - {dt}: FP {fp_val:.0f}, Visitors {v_val:.0f}, CVR {cvr_val:.1f}%")
+
+    # Weather summary
+    weather_summary = metrics.get("weather_summary", {})
+    if weather_summary:
+        lines.extend(["", "[By Weather — Full Period]"])
+        for w, vals in weather_summary.items():
+            fp_val = vals.get("floating_unique", 0)
+            v_val = vals.get("visitor_count", 0)
+            cvr_val = vals.get("quality_cvr", vals.get("conversion_rate", 0))
+            lines.append(f"  - {w}: FP {fp_val:.0f}, Visitors {v_val:.0f}, CVR {cvr_val:.1f}%")
+
+    # Recent history table (up to 30 days)
+    history_days = metrics.get("history_days", [])
+    history_count = metrics.get("history_count", len(history_days))
+    if history_days:
+        lines.extend(["", f"[Recent {history_count} Days — compare today against these]"])
         lines.append("Date       | DayType  | Weather | Temp       | FP     | Visitors | CVR   | Dwell")
         lines.append("---------- | -------- | ------- | ---------- | ------ | -------- | ----- | -----")
-        for d in recent_days:
+        for d in history_days:
             today_marker = " ← TODAY" if d["date"] == metrics.get("date") else ""
             lines.append(
                 f"{d['date']} | {d.get('day_type', ''):8s} | {d.get('weather', ''):7s} | "
@@ -932,7 +1147,7 @@ def _build_daily_ai_prompt(metrics: dict) -> str:
     if "period_avg_fp" in metrics:
         lines.extend([
             "",
-            f"[14-Day Average] FP: {metrics['period_avg_fp']:.0f}, "
+            f"[{history_count}-Day Average] FP: {metrics['period_avg_fp']:.0f}, "
             f"Visitors: {metrics['period_avg_v']:.0f}, "
             f"CVR: {metrics['period_avg_cvr']:.1f}%",
         ])
@@ -960,7 +1175,8 @@ def _build_daily_ai_prompt(metrics: dict) -> str:
         "Respond in EXACTLY 3 labeled sections (use these labels as-is):",
         "",
         "PERFORMANCE:",
-        "Compare today vs the recent 14-day history table above. "
+        f"Compare today vs the {history_count}-day history table above. "
+        "Also consider the full-period and day-type summaries. "
         "Explain WHY today is higher/lower than similar days (same day-type, same weather). "
         "Reference specific dates from the table for comparison. 2-3 sentences.",
         "",

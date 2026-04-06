@@ -2,50 +2,99 @@
   {
     "date": "2026-03-23",
     "floating_unique": 4226,
-    "visitor_count": 538,
-    "conversion_rate": 12.73,
-    "dwell_seconds_mean": 226.26
+    "visitor_count": 500,
+    "conversion_rate": 11.83,
+    "dwell_seconds_mean": 284.82
   },
   {
     "date": "2026-03-24",
     "floating_unique": 6019,
-    "visitor_count": 802,
-    "conversion_rate": 13.32,
-    "dwell_seconds_mean": 257.39
+    "visitor_count": 815,
+    "conversion_rate": 13.54,
+    "dwell_seconds_mean": 304.27
   },
   {
     "date": "2026-03-25",
     "floating_unique": 5993,
-    "visitor_count": 831,
-    "conversion_rate": 13.87,
-    "dwell_seconds_mean": 252.58
+    "visitor_count": 778,
+    "conversion_rate": 12.98,
+    "dwell_seconds_mean": 315.05
   },
   {
     "date": "2026-03-26",
     "floating_unique": 4859,
-    "visitor_count": 620,
-    "conversion_rate": 12.76,
-    "dwell_seconds_mean": 322.82
+    "visitor_count": 639,
+    "conversion_rate": 13.15,
+    "dwell_seconds_mean": 374.29
   },
   {
     "date": "2026-03-27",
     "floating_unique": 4592,
-    "visitor_count": 544,
-    "conversion_rate": 11.85,
-    "dwell_seconds_mean": 303.95
+    "visitor_count": 592,
+    "conversion_rate": 12.89,
+    "dwell_seconds_mean": 379.92
   },
   {
     "date": "2026-03-28",
     "floating_unique": 3145,
-    "visitor_count": 357,
-    "conversion_rate": 11.35,
-    "dwell_seconds_mean": 163.73
+    "visitor_count": 364,
+    "conversion_rate": 11.57,
+    "dwell_seconds_mean": 227.99
   },
   {
     "date": "2026-03-29",
     "floating_unique": 2970,
-    "visitor_count": 362,
-    "conversion_rate": 12.19,
-    "dwell_seconds_mean": 182.04
+    "visitor_count": 365,
+    "conversion_rate": 12.29,
+    "dwell_seconds_mean": 223.73
+  },
+  {
+    "date": "2026-03-30",
+    "floating_unique": 4109,
+    "visitor_count": 415,
+    "conversion_rate": 10.1,
+    "dwell_seconds_mean": 414.82
+  },
+  {
+    "date": "2026-03-31",
+    "floating_unique": 3856,
+    "visitor_count": 376,
+    "conversion_rate": 9.75,
+    "dwell_seconds_mean": 433.22
+  },
+  {
+    "date": "2026-04-01",
+    "floating_unique": 4206,
+    "visitor_count": 379,
+    "conversion_rate": 9.01,
+    "dwell_seconds_mean": 445.33
+  },
+  {
+    "date": "2026-04-02",
+    "floating_unique": 4193,
+    "visitor_count": 432,
+    "conversion_rate": 10.3,
+    "dwell_seconds_mean": 413.91
+  },
+  {
+    "date": "2026-04-03",
+    "floating_unique": 4403,
+    "visitor_count": 411,
+    "conversion_rate": 9.33,
+    "dwell_seconds_mean": 434.14
+  },
+  {
+    "date": "2026-04-04",
+    "floating_unique": 3252,
+    "visitor_count": 248,
+    "conversion_rate": 7.63,
+    "dwell_seconds_mean": 243.27
+  },
+  {
+    "date": "2026-04-05",
+    "floating_unique": 2850,
+    "visitor_count": 310,
+    "conversion_rate": 10.88,
+    "dwell_seconds_mean": 268.16
   }
 ]

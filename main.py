@@ -158,15 +158,45 @@ def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str,
 
         st.divider()
 
-        # -- Date Selection --
+        # -- Date Selection (with weekday + weather) --
         selected_date = None
         if loader is not None and loader.is_available():
             date_range_list = loader.get_date_range() or []
             if date_range_list:
+                # Build labels: "2026-03-29 (Sat) ☀️ 5~19°"
+                _WEEKDAY_KR = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+                _WEATHER_ICON = {"Sunny": "☀️", "Rain": "🌧️", "Snow": "❄️", "Unknown": ""}
+                _ds = loader.get_daily_stats()
+                _weather_map = {}
+                if not _ds.empty:
+                    for _, _r in _ds.iterrows():
+                        _d = str(_r["date"])
+                        _w = str(_r.get("weather", "")) if "weather" in _r.index else ""
+                        _tmax = _r.get("temp_max") if "temp_max" in _r.index else None
+                        _tmin = _r.get("temp_min") if "temp_min" in _r.index else None
+                        _weather_map[_d] = {"weather": _w, "temp_max": _tmax, "temp_min": _tmin}
+
+                def _date_label(d: str) -> str:
+                    import pandas as pd
+                    try:
+                        dt = pd.to_datetime(d)
+                        dow = _WEEKDAY_KR.get(dt.dayofweek, "")
+                        label = f"{d} ({dow})"
+                        wi = _weather_map.get(d, {})
+                        w_emoji = _WEATHER_ICON.get(wi.get("weather", ""), "")
+                        if w_emoji:
+                            label += f" {w_emoji}"
+                        if wi.get("temp_min") is not None and wi.get("temp_max") is not None:
+                            label += f" {wi['temp_min']:.0f}~{wi['temp_max']:.0f}°"
+                        return label
+                    except Exception:
+                        return d
+
                 selected_date = st.selectbox(
                     "Date",
                     date_range_list,
                     index=len(date_range_list) - 1,
+                    format_func=_date_label,
                 )
 
         st.divider()

@@ -2,9 +2,9 @@
   {
     "date": "2026-03-23",
     "floating_unique": 10599,
-    "visitor_count": 423,
-    "conversion_rate": 3.99,
-    "dwell_seconds_mean": 298.09,
+    "visitor_count": 400,
+    "conversion_rate": 3.77,
+    "dwell_seconds_mean": 365.73,
     "floating_unique_raw": 4226,
     "fp_correction_applied": true,
     "fp_correction_pct": 150.8
@@ -12,9 +12,9 @@
   {
     "date": "2026-03-24",
     "floating_unique": 14216,
-    "visitor_count": 607,
-    "conversion_rate": 4.27,
-    "dwell_seconds_mean": 353.9,
+    "visitor_count": 623,
+    "conversion_rate": 4.38,
+    "dwell_seconds_mean": 412.46,
     "floating_unique_raw": 6019,
     "fp_correction_applied": true,
     "fp_correction_pct": 136.19
@@ -22,9 +22,9 @@
   {
     "date": "2026-03-25",
     "floating_unique": 15178,
-    "visitor_count": 585,
-    "conversion_rate": 3.85,
-    "dwell_seconds_mean": 375.69,
+    "visitor_count": 582,
+    "conversion_rate": 3.83,
+    "dwell_seconds_mean": 436.05,
     "floating_unique_raw": 5993,
     "fp_correction_applied": true,
     "fp_correction_pct": 153.26
@@ -32,9 +32,9 @@
   {
     "date": "2026-03-26",
     "floating_unique": 10496,
-    "visitor_count": 425,
-    "conversion_rate": 4.05,
-    "dwell_seconds_mean": 492.09,
+    "visitor_count": 459,
+    "conversion_rate": 4.37,
+    "dwell_seconds_mean": 540.28,
     "floating_unique_raw": 4859,
     "fp_correction_applied": true,
     "fp_correction_pct": 116.01
@@ -42,9 +42,9 @@
   {
     "date": "2026-03-27",
     "floating_unique": 13052,
-    "visitor_count": 397,
-    "conversion_rate": 3.04,
-    "dwell_seconds_mean": 433.02,
+    "visitor_count": 430,
+    "conversion_rate": 3.29,
+    "dwell_seconds_mean": 539.98,
     "floating_unique_raw": 4592,
     "fp_correction_applied": true,
     "fp_correction_pct": 184.23
@@ -52,9 +52,9 @@
   {
     "date": "2026-03-28",
     "floating_unique": 6874,
-    "visitor_count": 224,
-    "conversion_rate": 3.26,
-    "dwell_seconds_mean": 291.34,
+    "visitor_count": 240,
+    "conversion_rate": 3.49,
+    "dwell_seconds_mean": 377.58,
     "floating_unique_raw": 3145,
     "fp_correction_applied": true,
     "fp_correction_pct": 118.57
@@ -62,11 +62,81 @@
   {
     "date": "2026-03-29",
     "floating_unique": 6099,
-    "visitor_count": 245,
-    "conversion_rate": 4.02,
-    "dwell_seconds_mean": 291.02,
+    "visitor_count": 248,
+    "conversion_rate": 4.07,
+    "dwell_seconds_mean": 353.63,
     "floating_unique_raw": 2970,
     "fp_correction_applied": true,
     "fp_correction_pct": 105.35
+  },
+  {
+    "date": "2026-03-30",
+    "floating_unique": 10354,
+    "visitor_count": 310,
+    "conversion_rate": 2.99,
+    "dwell_seconds_mean": 569.32,
+    "floating_unique_raw": 4109,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 151.98
+  },
+  {
+    "date": "2026-03-31",
+    "floating_unique": 8385,
+    "visitor_count": 290,
+    "conversion_rate": 3.46,
+    "dwell_seconds_mean": 574.55,
+    "floating_unique_raw": 3856,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 117.45
+  },
+  {
+    "date": "2026-04-01",
+    "floating_unique": 8836,
+    "visitor_count": 299,
+    "conversion_rate": 3.38,
+    "dwell_seconds_mean": 574.52,
+    "floating_unique_raw": 4206,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 110.08
+  },
+  {
+    "date": "2026-04-02",
+    "floating_unique": 10139,
+    "visitor_count": 319,
+    "conversion_rate": 3.15,
+    "dwell_seconds_mean": 575.42,
+    "floating_unique_raw": 4193,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 141.81
+  },
+  {
+    "date": "2026-04-03",
+    "floating_unique": 11094,
+    "visitor_count": 291,
+    "conversion_rate": 2.62,
+    "dwell_seconds_mean": 631.92,
+    "floating_unique_raw": 4403,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 151.96
+  },
+  {
+    "date": "2026-04-04",
+    "floating_unique": 7843,
+    "visitor_count": 191,
+    "conversion_rate": 2.44,
+    "dwell_seconds_mean": 334.14,
+    "floating_unique_raw": 3252,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 141.17
+  },
+  {
+    "date": "2026-04-05",
+    "floating_unique": 6146,
+    "visitor_count": 233,
+    "conversion_rate": 3.79,
+    "dwell_seconds_mean": 375.36,
+    "floating_unique_raw": 2850,
+    "fp_correction_applied": true,
+    "fp_correction_pct": 115.65
   }
 ]
