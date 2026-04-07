@@ -48,8 +48,54 @@ AMBER = "#d97706"
 SLATE_GRAY = "#64748b"
 
 
+_LOCATION_CONTEXT = {
+    "Victor_Suwon_Starfield": (
+        "[Store & Location Context]\n"
+        "- Store: VICTOR (global badminton brand), showcase-type experiential retail store\n"
+        "- Location: Starfield Suwon 6F (Sports & Home Furnishing floor)\n"
+        "- Address: 175 Suseong-ro, Jangan-gu, Suwon-si, Gyeonggi-do\n"
+        "- Mall: Starfield Suwon — 8-story large-scale complex (shopping + cinema + leisure + dining)\n"
+        "- 6F neighbors: sports brands, outdoor gear, home furnishing, community zones\n"
+        "- Operating hours: 10:00-22:00 (mall standard)\n"
+        "- Opened: Jan 30, 2026\n"
+        "\n"
+        "[Location Characteristics]\n"
+        "- Suburban mega-mall: visitors come by car (parking 3,600+), planned shopping trips\n"
+        "- Weekend/holiday traffic 2-3x higher than weekday (leisure destination)\n"
+        "- 6F is upper floor → visitors who reach here have strong intent (not casual walk-by)\n"
+        "- Mall-wide events (seasonal sales, exhibitions, food festivals) strongly drive traffic to all floors\n"
+        "- Surrounding: residential area (Gwanggyo new town), university (Sungkyunkwan), Suwon station nearby\n"
+        "- Competition: other sports brands on same floor, online shopping\n"
+        "- Key advantage: experiential/showcase store — try before buy, brand immersion\n"
+        "- CVR interpretation: low CVR (1-3%) is normal for mall upper floors; quality of visit matters more"
+    ),
+    "GS25_Yeoksam": (
+        "[Store & Location Context]\n"
+        "- Store: GS25 convenience store (역삼홍인점)\n"
+        "- Location: Bongeunsa-ro 30-gil 43, 1F, Yeoksam-dong, Gangnam-gu, Seoul\n"
+        "- Side street off the main Bongeunsa-ro (major 6-lane road)\n"
+        "- Operating hours: 24 hours\n"
+        "\n"
+        "[Location Characteristics]\n"
+        "- Gangnam business district: one of Korea's densest office areas\n"
+        "- 3 subway stations within walking distance: Gangnam, Yeoksam, Seolleung\n"
+        "- Daytime floating population: ~200,000 (office workers + visitors)\n"
+        "- Weekday >> Weekend traffic (office-driven demand)\n"
+        "- Peak hours: morning commute (07-09h), lunch (12-13h), evening (18-20h)\n"
+        "- Late-night demand (22-02h): significant for CVS in entertainment/office area\n"
+        "- Surrounding: mixed residential + office buildings, restaurants, cafes\n"
+        "- Side-street location: less walk-by traffic than main road, but loyal regular customers\n"
+        "- Competition: multiple CVS within 200m radius (intense competition)\n"
+        "- Key advantage: proximity to residential buildings → regular customers, late-night monopoly\n"
+        "- CVR interpretation: 2-5% CVR is typical for side-street CVS; higher CVR than main-road stores"
+    ),
+}
+
+
 def _get_sector_context(space_name: str) -> str:
-    """Build a short domain context string for AI prompts from REGISTERED_SECTORS."""
+    """Build location & store context for AI prompts."""
+    if space_name in _LOCATION_CONTEXT:
+        return _LOCATION_CONTEXT[space_name]
     meta = REGISTERED_SECTORS.get(space_name, {})
     desc = meta.get("description", "")
     loc = meta.get("location", "")
@@ -1048,21 +1094,35 @@ def _get_sector_behavior_context(space_name: str) -> str:
     stype = meta.get("store_type", "retail")
     if stype == "convenience_store":
         return (
-            "[Sector Behavior Patterns]\n"
-            "- Convenience store: commute-hour peaks (07-09h, 18-20h), lunch rush (12-13h)\n"
-            "- Late-night demand (22-02h) is a key differentiator\n"
-            "- Weather drives impulse purchases (rain = umbrella/hot drinks, cold = warm food)\n"
-            "- Weekday > Weekend for office-area CVS\n"
-            "- Short dwell (<3min) is normal; medium dwell signals browsing/meal purchase"
+            "[Visitor Behavior Patterns — Convenience Store]\n"
+            "- Traffic drivers: commute hours (07-09h, 18-20h), lunch rush (12-13h), late-night (22-02h)\n"
+            "- Weather impact: rain → umbrella/hot drink impulse buy; cold → warm food (increased CVR)\n"
+            "- Sunny warm weather → people eat outside, CVS traffic may drop\n"
+            "- Weekday >> Weekend for office-area CVS (reversed from malls)\n"
+            "- Dwell 1-3min: quick purchase (drinks, snacks, cigarettes) — majority of visits\n"
+            "- Dwell 3-6min: browsing or meal purchase — high-value customer\n"
+            "- Dwell 6min+: eating in-store or using services (ATM, delivery pickup)\n"
+            "- MAC randomization note: iPhone MAC changes every 15-20min, Android every 5-10min\n"
+            "  → dwell >15min may be underestimated. Focus on 1-10min range for accurate analysis.\n"
+            "- Advertising insight: morning/lunch promos target office workers; night promos target residents"
         )
     elif stype == "sports_retail":
         return (
-            "[Sector Behavior Patterns]\n"
-            "- Sports retail in mall: Weekend >> Weekday traffic\n"
-            "- Seasonal peaks: sports season openings, back-to-school, year-end sales\n"
-            "- Mall events strongly correlate with foot traffic spikes\n"
-            "- Long dwell (10min+) signals serious purchase intent\n"
-            "- Medium dwell (3-10min) = browsing, good for upselling opportunities"
+            "[Visitor Behavior Patterns — Sports Retail in Mall]\n"
+            "- Traffic drivers: weekend leisure, mall events, seasonal sports (spring/fall best)\n"
+            "- Weather impact: rain/snow → indoor mall traffic increases (positive for store)\n"
+            "- Sunny weekend → outdoor activities compete with mall visits (negative)\n"
+            "- Weekend traffic 2-3x weekday (mall characteristic)\n"
+            "- Peak hours: 14-18h (afternoon shopping after lunch)\n"
+            "- Dwell 1-3min: window shopping / passing through — low purchase intent\n"
+            "- Dwell 3-6min: browsing specific items — medium intent\n"
+            "- Dwell 6-10min: trying products, comparing — high intent\n"
+            "- Dwell 10min+: serious buyer, likely to purchase or seek staff assistance\n"
+            "- MAC randomization note: long browsing sessions (20min+) may split into multiple visits\n"
+            "  → focus on 3-15min range for accurate purchase-intent analysis.\n"
+            "- Advertising insight: Instagram/social ads before weekend; in-mall digital signage on lower floors\n"
+            "- Upper floor (6F) location: visitors reaching here already passed 5 floors of alternatives\n"
+            "  → high intent but smaller volume. Quality over quantity."
         )
     return ""
 
