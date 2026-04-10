@@ -14,6 +14,7 @@ def hourly_stats_for_date(
     daily_hourly: pd.DataFrame,
     sessions_all: pd.DataFrame,
     date_str: str,
+    fp_coverage: str = "medium",
 ) -> pd.DataFrame:
     """
     Build one row per hour (0–23) for the given date.
@@ -30,7 +31,12 @@ def hourly_stats_for_date(
         cvr_map = {h: 0.0 for h in hours}
     else:
         sub_idx = sub.set_index("hour")
-        fp_map = sub_idx["floating_count"].to_dict()
+        # Use coverage-specific column if available, fallback to floating_count
+        fp_cov_col = f"floating_count_{fp_coverage}"
+        if fp_cov_col in sub_idx.columns:
+            fp_map = sub_idx[fp_cov_col].to_dict()
+        else:
+            fp_map = sub_idx["floating_count"].to_dict()
         v_map = sub_idx["visitor_count"].to_dict()
         # Use pre-computed CVR from cache (same source as daily_stats CVR)
         cvr_map = sub_idx["conversion_rate"].to_dict() if "conversion_rate" in sub_idx.columns else {}
@@ -120,6 +126,7 @@ def _compute_subhour_stats(
     date_str: str,
     bin_minutes: int = 30,
     daily_fp: int = 0,
+    fp_coverage: str = "medium",
 ) -> pd.DataFrame:
     """
     Compute sub-hourly binned stats.
@@ -239,6 +246,7 @@ def hourly_stats_flexible(
     dates: List[str],
     bin_minutes: int = 60,
     daily_stats: Optional[pd.DataFrame] = None,
+    fp_coverage: str = "medium",
 ) -> pd.DataFrame:
     """
     Compute time-binned stats across one or more dates, then average.
@@ -251,6 +259,7 @@ def hourly_stats_flexible(
     dates : List of date strings ('YYYY-MM-DD')
     bin_minutes : 5, 10, 15, 30, or 60
     daily_stats : daily_stats DataFrame (for daily_fp lookup in sub-hour bins)
+    fp_coverage : Coverage level for FP column selection (narrow/medium/wide/full)
 
     Returns
     -------
@@ -264,7 +273,7 @@ def hourly_stats_flexible(
     for date_str in dates:
         if bin_minutes == 60:
             # 60min: reuse existing hourly function (already validated)
-            df = hourly_stats_for_date(daily_hourly, sessions, date_str)
+            df = hourly_stats_for_date(daily_hourly, sessions, date_str, fp_coverage=fp_coverage)
             df["bin_label"] = df["hour"].apply(lambda h: f"{h:02d}:00")
             df["bin_idx"] = df["hour"]
         else:
@@ -273,10 +282,15 @@ def hourly_stats_flexible(
             if daily_stats is not None and not daily_stats.empty:
                 ds_row = daily_stats[daily_stats["date"].astype(str) == date_str]
                 if not ds_row.empty:
-                    d_fp = int(ds_row.iloc[0].get("floating_unique", 0))
+                    # Use coverage-specific column if available
+                    fp_cov_col = f"floating_{fp_coverage}"  # e.g., "floating_medium"
+                    if fp_cov_col in ds_row.columns:
+                        d_fp = int(ds_row.iloc[0].get(fp_cov_col, 0))
+                    else:
+                        d_fp = int(ds_row.iloc[0].get("floating_unique", 0))
             df = _compute_subhour_stats(
                 sessions, daily_timeseries, daily_hourly,
-                date_str, bin_minutes=bin_minutes, daily_fp=d_fp,
+                date_str, bin_minutes=bin_minutes, daily_fp=d_fp, fp_coverage=fp_coverage,
             )
         frames.append(df)
 

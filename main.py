@@ -51,43 +51,57 @@ def _get_loader(space_name: str) -> CacheLoader:
     return CacheLoader(space_name)
 
 
-# -- Space Notes (Admin) ---------------------------------------------------
+# -- Space Notes ---------------------------------------------------
 
 def _render_space_notes(space_name: str, loader: CacheLoader) -> None:
-    """Render space notes editor in sidebar (Admin only)."""
-    with st.expander("Space Notes", expanded=False):
-        saved_notes = loader.get_space_notes()
-        from config import REGISTERED_SECTORS
-        sector_meta = REGISTERED_SECTORS.get(space_name, {})
-        stype = sector_meta.get("store_type", "")
-        if stype == "sports_retail":
-            placeholder_hint = "e.g. Seasonal sale, mall event, sport season opening..."
-        elif stype == "convenience_store":
-            placeholder_hint = "e.g. Nearby construction, office building closure, promotion campaign..."
-        else:
-            placeholder_hint = "e.g. Holiday hours, renovation, special events..."
-        notes_input = st.text_area(
-            label="Operator notes / remarks",
-            value=saved_notes,
-            height=100,
-            key=f"space_notes_{space_name}",
-            placeholder=placeholder_hint,
-            label_visibility="collapsed",
-        )
-        if st.button("Save", key="save_notes_btn"):
-            ok = loader.save_space_notes(notes_input)
-            if ok:
-                st.success("Saved")
+    """Render space notes in sidebar.
+    - Admin: editable text area with Save button
+    - Regular user: read-only display (only shown if notes exist)
+    """
+    saved_notes = loader.get_space_notes()
+    st.session_state["current_space_notes"] = saved_notes
+
+    if is_admin():
+        with st.expander("Space Notes", expanded=False):
+            from config import REGISTERED_SECTORS
+            sector_meta = REGISTERED_SECTORS.get(space_name, {})
+            stype = sector_meta.get("store_type", "")
+            if stype == "sports_retail":
+                placeholder_hint = "e.g. Seasonal sale, mall event, sport season opening..."
+            elif stype == "convenience_store":
+                placeholder_hint = "e.g. Nearby construction, office building closure, promotion campaign..."
             else:
-                st.error("Save failed")
-        st.session_state["current_space_notes"] = notes_input
+                placeholder_hint = "e.g. Holiday hours, renovation, special events..."
+            notes_input = st.text_area(
+                label="Operator notes / remarks",
+                value=saved_notes,
+                height=100,
+                key=f"space_notes_{space_name}",
+                placeholder=placeholder_hint,
+                label_visibility="collapsed",
+            )
+            if st.button("Save", key="save_notes_btn"):
+                ok = loader.save_space_notes(notes_input)
+                if ok:
+                    st.success("Saved")
+                else:
+                    st.error("Save failed")
+            st.session_state["current_space_notes"] = notes_input
+    else:
+        # Read-only: only show if notes exist
+        if saved_notes and saved_notes.strip():
+            with st.expander("Space Notes", expanded=True):
+                st.markdown(
+                    f'<div style="font-size:0.82rem; color:#ccd6f6; white-space:pre-wrap;">{saved_notes}</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # -- Sidebar ---------------------------------------------------------------
 
-def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str, str | None, tuple[int, int]]:
+def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str, str | None, tuple[int, int], str]:
     """
-    Render sidebar. Returns (space_name, view_mode, selected_date, time_range).
+    Render sidebar. Returns (space_name, view_mode, selected_date, time_range, fp_coverage).
 
     Parameters
     ----------
@@ -227,8 +241,18 @@ def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str,
             help="Time range filter for analysis",
         )
 
-        # -- Space Notes (Admin) --
-        if is_admin() and loader is not None and loader.is_available():
+        # -- Floating Population Coverage --
+        fp_coverage = st.radio(
+            "Traffic Data Collection Coverage",
+            options=["narrow", "medium", "wide", "full"],
+            format_func=lambda x: {"narrow": "🔴 Narrow  (iPhone ≥ -70 dBm)", "medium": "🟡 Medium  (iPhone ≥ -80 dBm)", "wide": "🟢 Wide     (iPhone ≥ -90 dBm)", "full": "⚪ Full      (No RSSI limit)"}[x],
+            index=1,
+            key="hermes_fp_coverage",
+            help="Adjusts the RSSI range for counting passersby.\nNarrow = close range only · Wide = includes distant signals\nFull = all detected signals, no filter\nAndroid threshold is 10 dBm lower than iPhone.",
+        )
+
+        # -- Space Notes (Admin: edit / User: read-only) --
+        if loader is not None and loader.is_available():
             st.divider()
             _render_space_notes(space_name, loader)
 
@@ -247,7 +271,7 @@ def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str,
         if st.button("Logout", use_container_width=True, key="hermes_logout"):
             logout()
 
-    return space_name, view_mode, selected_date, time_range
+    return space_name, view_mode, selected_date, time_range, fp_coverage
 
 
 # -- No Cache Handler ------------------------------------------------------
@@ -283,7 +307,7 @@ def main():
         loader = None
 
     # 4. Render sidebar
-    space_name, view_mode, selected_date, time_range = _render_sidebar(loader=loader)
+    space_name, view_mode, selected_date, time_range, fp_coverage = _render_sidebar(loader=loader)
     if not space_name:
         st.info("Please select a sector.")
         return
@@ -301,15 +325,15 @@ def main():
 
     # 7. View routing
     if view_mode == "Daily Analysis":
-        render_dashboard(space_name, loader, selected_date, time_range, mode="daily")
+        render_dashboard(space_name, loader, selected_date, time_range, mode="daily", fp_coverage=fp_coverage)
     elif view_mode == "Period Comparison":
-        render_dashboard(space_name, loader, selected_date, time_range, mode="comparison")
+        render_dashboard(space_name, loader, selected_date, time_range, mode="comparison", fp_coverage=fp_coverage)
     elif view_mode == "Report":
         render_report(space_name, loader)
     elif view_mode == "Admin" and is_admin():
         render_pipeline_view(space_name, loader)
     else:
-        render_dashboard(space_name, loader, selected_date, time_range, mode="daily")
+        render_dashboard(space_name, loader, selected_date, time_range, mode="daily", fp_coverage=fp_coverage)
 
 
 if __name__ == "__main__":

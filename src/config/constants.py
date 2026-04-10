@@ -23,6 +23,13 @@ FALLBACK_FLOATING_RSSI = -90
 # Android threshold: rssi_threshold + ANDROID_RSSI_OFFSET
 ANDROID_RSSI_OFFSET = -10
 
+# Wide/Full Android FP 보정 가드
+# - 방문자 Apple:Android 비율이 MIN 이하인 날 → iPhone MAC 랜덤화 아티팩트로 판단 → 보정 스킵
+#   (Starfield처럼 넓은 공간에서 iPhone MAC 랜덤화로 Apple 세션이 과소계산되는 현상 방지)
+# - 보정 후 FP가 원본의 MAX_FACTOR 배를 초과하면 캡(cap) 적용
+ANDROID_CORRECTION_MIN_VISITOR_RATIO = 0.25  # Apple:Android 방문자 비율 최솟값
+ANDROID_CORRECTION_MAX_FACTOR = 2.0          # 보정 후 FP ≤ 원본 × 이 배수
+
 # 디바이스 타입 (raw 컬럼 type)
 DEVICE_TYPE_APPLE = 1
 DEVICE_TYPE_ANDROID = 10

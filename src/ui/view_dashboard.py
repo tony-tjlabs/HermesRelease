@@ -27,6 +27,7 @@ import streamlit as st
 from src.cache.cache_io import CacheLoader
 from src.analytics.uplift import compute_week_over_week
 from src.analytics.hourly_analysis import hourly_stats_flexible, identify_peak_hours
+from src.analytics.korean_calendar import get_korean_calendar_context
 from src.ui.helpers import (
     has_api_key,
     render_metric_card, make_plotly_layout,
@@ -108,8 +109,8 @@ def _get_sector_context(space_name: str) -> str:
 # -- Cached Wrappers -------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-def _cached_wow(daily_stats: pd.DataFrame, days_per_week: int = 7) -> dict:
-    return compute_week_over_week(daily_stats, days_per_week=days_per_week)
+def _cached_wow(daily_stats: pd.DataFrame, days_per_week: int = 7, fp_col: str = "floating_unique") -> dict:
+    return compute_week_over_week(daily_stats, days_per_week=days_per_week, fp_col=fp_col)
 
 
 @st.cache_data(show_spinner=False, ttl=600)
@@ -120,6 +121,7 @@ def _cached_hourly_stats(
     dates: Tuple[str, ...],
     bin_minutes: int,
     daily_stats_json: str,
+    fp_coverage: str = "medium",
 ) -> pd.DataFrame:
     """Cached wrapper for hourly_stats_flexible to avoid recomputation on reruns."""
     from io import StringIO
@@ -130,7 +132,7 @@ def _cached_hourly_stats(
     return hourly_stats_flexible(
         daily_hourly, sessions, daily_timeseries,
         list(dates), bin_minutes=bin_minutes,
-        daily_stats=daily_stats,
+        daily_stats=daily_stats, fp_coverage=fp_coverage,
     )
 
 
@@ -141,13 +143,14 @@ def _get_hourly_stats_cached(
     dates: list,
     bin_minutes: int,
     daily_stats: Optional[pd.DataFrame] = None,
+    fp_coverage: str = "medium",
 ) -> pd.DataFrame:
     """Helper that serializes DataFrames for caching."""
     dh_json = daily_hourly.to_json(orient="split", date_format="iso") if not daily_hourly.empty else ""
     sess_json = sessions.to_json(orient="split", date_format="iso") if not sessions.empty else ""
     ts_json = daily_timeseries.to_json(orient="split", date_format="iso") if not daily_timeseries.empty else ""
     ds_json = daily_stats.to_json(orient="split", date_format="iso") if daily_stats is not None and not daily_stats.empty else ""
-    return _cached_hourly_stats(dh_json, sess_json, ts_json, tuple(dates), bin_minutes, ds_json)
+    return _cached_hourly_stats(dh_json, sess_json, ts_json, tuple(dates), bin_minutes, ds_json, fp_coverage)
 
 
 
@@ -158,15 +161,31 @@ def _cached_ai_daily(metrics_json: str, space_notes: str = "", lang: str = "Engl
     """Cache AI analysis result for daily mode."""
     metrics = json.loads(metrics_json)
     system_prompt = (
-        "You are a Hermes retail spatial intelligence analyst specializing in small-store analytics. "
-        "Data comes from BLE S-Ward sensors (10-second sampling). "
-        "FP = Floating Population (unique MACs near store). "
-        "Visitors = verified entries via 3-stage filter (session + min dwell + 80% RSSI pass). "
-        "CVR = Visitors/FP. Quality CVR counts only medium+long dwell visitors. "
-        "Dwell = entry-to-exit time per session. MAC randomization means FP counts are approximate. "
-        "You must structure your response with labeled sections as requested in the user prompt. "
-        "Focus on actionable insights: advertising timing, location value, and store operations. "
-        "Include specific numbers."
+        "You are a Korean retail spatial intelligence expert specializing in urban convenience store analytics. "
+        "You deeply understand Korean society, office-district consumption patterns, and the CVS (convenience store) industry.\n\n"
+        "Technical context:\n"
+        "- Data source: BLE S-Ward sensors, 10-second sampling intervals\n"
+        "- FP (Floating Population): unique BLE MAC addresses detected near the store for ≥30 seconds; "
+        "  affected by MAC randomization (iPhone every ~15-20min, Android every ~5-10min) — FP undercounts real people\n"
+        "- Visitors: confirmed store entries passing 3-stage filter (session construction + min dwell 60s + 60% RSSI pass ratio)\n"
+        "- CVR = Visitors ÷ FP × 100%. Industry benchmark for side-street CVS in Gangnam: 2–5%\n"
+        "- Quality CVR = (visitors with 3min+ dwell) ÷ FP. Measures genuine engagement, not quick grab-and-go\n"
+        "- Dwell time: entry-to-exit per session; sessions >15min may be underestimated due to MAC rotation\n\n"
+        "Korean CVS expertise:\n"
+        "- Gangnam Yeoksam: ~200,000 daily office workers within walking distance (Gangnam/Yeoksam/Seolleung stations)\n"
+        "- Weekday demand peaks: 07-09h (commute coffee/breakfast), 12-13h (lunch meal purchase), 18-20h (return commute snack)\n"
+        "- Weekend traffic 30-50% lower than weekday for office-district CVS\n"
+        "- Korean public holidays = near-zero office traffic → drops to residential/tourist baseline\n"
+        "- Rain/cold weather → hot food (라면, 온음료) impulse purchase → CVR increases despite lower FP\n"
+        "- Warm sunny weather → people eat outside → CVS meal purchase drops, beverage purchase up\n"
+        "- Side-street CVS advantage: loyal repeat customers (residents/fixed-desk workers), late-night demand\n"
+        "- Seasonal: year-end (Dec) = office parties → late-night spike; spring exam season (Apr-May) = student traffic\n\n"
+        "Response rules:\n"
+        "- Respond in the language specified in the prompt (한국어 or English)\n"
+        "- Structure output with the EXACT section labels requested\n"
+        "- Always cite specific numbers from the data\n"
+        "- Connect data patterns to real Korean social/behavioral context (not generic retail advice)\n"
+        "- Be direct: state what is happening and why, then give one clear action per recommendation"
     )
     user_prompt = _build_daily_ai_prompt(metrics)
     return call_claude(user_prompt, system=system_prompt, space_notes=space_notes, lang=lang)
@@ -177,15 +196,26 @@ def _cached_ai_comparison(metrics_json: str, space_notes: str = "", lang: str = 
     """Cache AI analysis result for comparison mode."""
     metrics = json.loads(metrics_json)
     system_prompt = (
-        "You are a Hermes retail spatial intelligence analyst specializing in small-store analytics. "
-        "Data comes from BLE S-Ward sensors (10-second sampling). "
-        "FP = Floating Population (unique MACs near store). "
-        "Visitors = verified entries via 3-stage filter (session + min dwell + 80% RSSI pass). "
-        "CVR = Visitors/FP. Quality CVR counts only medium+long dwell visitors. "
-        "MAC randomization means FP is approximate but trends are reliable. "
-        "You must structure your response with labeled sections as requested in the user prompt. "
-        "Focus on actionable strategy: promotion timing, location value assessment, and operations. "
-        "Include specific numbers."
+        "You are a Korean retail spatial intelligence expert specializing in urban convenience store analytics. "
+        "You deeply understand Korean society, office-district consumption patterns, and the CVS industry.\n\n"
+        "Technical context:\n"
+        "- BLE sensor data: FP = unique MACs ≥30s detection; Visitors = 3-stage filter (session+dwell+RSSI)\n"
+        "- CVR industry benchmark for side-street Gangnam CVS: 2–5%\n"
+        "- MAC randomization causes FP undercounting; trends and ratios are reliable, absolute numbers approximate\n"
+        "- Day-type matters: Weekday (office workers) >> Weekend for Gangnam CVS\n\n"
+        "Korean CVS expertise (same as daily mode — apply to period analysis):\n"
+        "- Public holidays = near-zero office traffic; long weekends = compounding effect\n"
+        "- Trend direction should be interpreted against Korean social calendar events\n"
+        "- Week-over-week changes >10% in Gangnam CVS are meaningful (not noise)\n"
+        "- FP trend reflects area foot traffic; CVR trend reflects store effectiveness\n"
+        "- If FP drops but CVR rises: fewer people but more targeted visitors (bad weather, holiday, etc.)\n"
+        "- If FP rises but CVR drops: more passersby but less store appeal (competing promotions, etc.)\n\n"
+        "Response rules:\n"
+        "- Respond in the language specified\n"
+        "- Structure with EXACT section labels requested\n"
+        "- Reference specific dates and numbers from the data table\n"
+        "- Explain trends using Korean social context (not generic patterns)\n"
+        "- Recommendations must be actionable for a single CVS store operator"
     )
     user_prompt = _build_comparison_ai_prompt(metrics)
     return call_claude(user_prompt, system=system_prompt, space_notes=space_notes, lang=lang)
@@ -199,6 +229,7 @@ def render_dashboard(
     selected_date: Optional[str] = None,
     time_range: tuple[int, int] = (7, 23),
     mode: str = "daily",
+    fp_coverage: str = "medium",
 ) -> None:
     """
     Render dashboard in daily or comparison mode.
@@ -213,22 +244,36 @@ def render_dashboard(
         Hour range filter (start, end)
     mode : str
         "daily" or "comparison"
+    fp_coverage : str
+        "narrow" | "medium" | "wide" — selects floating population coverage column
     """
     if mode == "daily":
-        _render_daily(space_name, loader, selected_date, time_range)
+        _render_daily(space_name, loader, selected_date, time_range, fp_coverage=fp_coverage)
     else:
-        _render_comparison(space_name, loader, time_range)
+        _render_comparison(space_name, loader, time_range, fp_coverage=fp_coverage)
 
 
 # ===========================================================================
 #  DAILY ANALYSIS MODE
 # ===========================================================================
 
+def _fp_col(daily_stats: pd.DataFrame, fp_coverage: str) -> str:
+    """Return the floating population column name based on coverage setting.
+    Falls back to 'floating_unique' if coverage columns are not yet in cache.
+    """
+    col_map = {"narrow": "floating_narrow", "medium": "floating_medium", "wide": "floating_wide", "full": "floating_full"}
+    col = col_map.get(fp_coverage, "floating_medium")
+    if col in daily_stats.columns:
+        return col
+    return "floating_unique"
+
+
 def _render_daily(
     space_name: str,
     loader: CacheLoader,
     selected_date: Optional[str],
     time_range: tuple[int, int],
+    fp_coverage: str = "medium",
 ) -> None:
     """Single-date deep dive: KPI -> Trend -> Hourly -> Dwell -> AI."""
 
@@ -280,10 +325,11 @@ def _render_daily(
     has_quality = "quality_cvr" in daily_stats.columns
     has_median = "dwell_median_seconds" in daily_stats.columns
 
-    fp_val = int(row.get("floating_unique", 0))
+    fp_col = _fp_col(daily_stats, fp_coverage)
+    fp_val = int(row.get(fp_col, 0))
     v_val = int(row.get("visitor_count", 0))
-    cvr_val = float(row.get("conversion_rate", 0))
-    q_cvr_val = float(row.get("quality_cvr", 0)) if has_quality else None
+    cvr_val = (v_val / fp_val * 100.0) if fp_val > 0 else 0.0
+    q_cvr_val = (float(row.get("quality_visitor_count", 0)) / fp_val * 100.0) if has_quality and fp_val > 0 else None
     if has_median:
         dwell_sec = row.get("dwell_median_seconds", 0)
     else:
@@ -335,7 +381,7 @@ def _render_daily(
         h_df = _get_hourly_stats_cached(
             daily_hourly, sessions, daily_timeseries,
             [date_str], bin_minutes=bin_minutes,
-            daily_stats=daily_stats,
+            daily_stats=daily_stats, fp_coverage=fp_coverage,
         )
 
         if not h_df.empty:
@@ -456,7 +502,7 @@ def _render_daily(
 
     # -- Detail Table (expandable) --
     with st.expander("Daily Detail Table"):
-        detail_cols = ["date", "floating_unique", "visitor_count", "conversion_rate"]
+        detail_cols = ["date", fp_col if fp_col != "floating_unique" else "floating_unique", "visitor_count", "conversion_rate"]
         if has_quality:
             detail_cols.append("quality_cvr")
         if has_median:
@@ -486,7 +532,7 @@ def _render_daily(
         ai_lang = st.selectbox("Language", ["English", "한국어"], key="daily_ai_lang", label_visibility="collapsed")
     with col_btn:
         if st.button("Generate AI Analysis", type="primary", use_container_width=True, key="daily_ai_btn"):
-            _run_daily_ai(space_name, row, daily_stats, loader, date_str, time_range, lang=ai_lang)
+            _run_daily_ai(space_name, row, daily_stats, loader, date_str, time_range, lang=ai_lang, fp_coverage=fp_coverage)
 
 
 def _render_ai_sections(text: str, section_labels: list[str]) -> None:
@@ -541,105 +587,141 @@ def _run_daily_ai(
     date_str: str,
     time_range: tuple[int, int],
     lang: str = "English",
+    fp_coverage: str = "medium",
 ) -> None:
-    """Run AI analysis for daily mode.
-
-    Now includes full available data (up to 30 days) for better AI context.
-    """
+    """Run AI analysis for daily mode — enriched with hourly pattern, trend direction, Korean calendar."""
     has_quality = "quality_cvr" in daily_stats.columns
     has_median = "dwell_median_seconds" in daily_stats.columns
+    qc = "quality_cvr" if has_quality else "conversion_rate"
+    dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
+    fp_col_daily = _fp_col(daily_stats, fp_coverage)
 
     metrics = {
         "space_name": space_name,
         "date": date_str,
         "time_range": list(time_range),
-        "fp": int(row.get("floating_unique", 0)),
+        "fp": int(row.get(fp_col_daily, 0)),
         "visitors": int(row.get("visitor_count", 0)),
-        "cvr": float(row.get("quality_cvr" if has_quality else "conversion_rate", 0)),
-        "dwell_sec": float(row.get("dwell_median_seconds" if has_median else "dwell_seconds_mean", 0)),
+        "cvr": float(row.get(qc, 0)),
+        "dwell_sec": float(row.get(dwell_col, 0)),
         "has_quality": has_quality,
     }
 
-    # Add 5-tier dwell from sessions
+    # ── 한국 캘린더 컨텍스트 ──────────────────────────────────────────────
+    cal = get_korean_calendar_context(date_str)
+    if cal:
+        metrics["korean_calendar"] = cal
+
+    # ── 5-tier 체류 분포 ──────────────────────────────────────────────────
     sessions = loader.get_sessions_stitched()
     if sessions.empty:
         sessions = loader.get_sessions_all()
-    s_day_ai = sessions[sessions["date"].astype(str) == date_str] if not sessions.empty and "date" in sessions.columns else sessions
-    if not s_day_ai.empty and "dwell_seconds" in s_day_ai.columns:
-        d_ai = s_day_ai["dwell_seconds"]
-        total_v_ai = len(d_ai) or 1
-        metrics["dwell_1_3min_pct"] = round(((d_ai >= 60) & (d_ai < 180)).sum() / total_v_ai * 100, 1)
-        metrics["dwell_3_6min_pct"] = round(((d_ai >= 180) & (d_ai < 360)).sum() / total_v_ai * 100, 1)
-        metrics["dwell_6_10min_pct"] = round(((d_ai >= 360) & (d_ai < 600)).sum() / total_v_ai * 100, 1)
-        metrics["dwell_10_15min_pct"] = round(((d_ai >= 600) & (d_ai < 900)).sum() / total_v_ai * 100, 1)
-        metrics["dwell_15plus_pct"] = round((d_ai >= 900).sum() / total_v_ai * 100, 1)
+    s_day = sessions[sessions["date"].astype(str) == date_str] if not sessions.empty and "date" in sessions.columns else pd.DataFrame()
+    if not s_day.empty and "dwell_seconds" in s_day.columns:
+        d_ai = s_day["dwell_seconds"]
+        total_v = len(d_ai) or 1
+        metrics["dwell_1_3min_pct"]   = round(((d_ai >= 60)  & (d_ai < 180)).sum() / total_v * 100, 1)
+        metrics["dwell_3_6min_pct"]   = round(((d_ai >= 180) & (d_ai < 360)).sum() / total_v * 100, 1)
+        metrics["dwell_6_10min_pct"]  = round(((d_ai >= 360) & (d_ai < 600)).sum() / total_v * 100, 1)
+        metrics["dwell_10_15min_pct"] = round(((d_ai >= 600) & (d_ai < 900)).sum() / total_v * 100, 1)
+        metrics["dwell_15plus_pct"]   = round((d_ai >= 900).sum() / total_v * 100, 1)
 
-    # Add day type / weather (including temperature & precipitation)
-    if "day_type" in row.index:
-        metrics["day_type"] = str(row.get("day_type", ""))
-    if "weather" in row.index:
-        metrics["weather"] = str(row.get("weather", ""))
-    if "temp_max" in row.index:
-        metrics["temp_max"] = float(row.get("temp_max", 0))
-    if "temp_min" in row.index:
-        metrics["temp_min"] = float(row.get("temp_min", 0))
-    if "precipitation" in row.index:
-        metrics["precipitation"] = float(row.get("precipitation", 0))
+    # ── 시간대별 패턴 (hourly breakdown for AI) ───────────────────────────
+    daily_hourly = loader.get_daily_hourly()
+    if not daily_hourly.empty:
+        h_day = daily_hourly[daily_hourly["date"].astype(str) == date_str]
+        if not h_day.empty:
+            def _band_sum(h_df, h_start, h_end, col):
+                return int(h_df[(h_df["hour"] >= h_start) & (h_df["hour"] < h_end)][col].sum())
+            _fp_col_h_cov = f"floating_count_{fp_coverage}"
+            fp_col_h = _fp_col_h_cov if _fp_col_h_cov in h_day.columns else "floating_count"
+            metrics["hourly_bands"] = {
+                "morning_07_09":   {"fp": _band_sum(h_day, 7, 9, fp_col_h),   "visitors": _band_sum(h_day, 7, 9, "visitor_count")},
+                "lunch_12_14":     {"fp": _band_sum(h_day, 12, 14, fp_col_h), "visitors": _band_sum(h_day, 12, 14, "visitor_count")},
+                "afternoon_14_18": {"fp": _band_sum(h_day, 14, 18, fp_col_h), "visitors": _band_sum(h_day, 14, 18, "visitor_count")},
+                "evening_18_21":   {"fp": _band_sum(h_day, 18, 21, fp_col_h), "visitors": _band_sum(h_day, 18, 21, "visitor_count")},
+                "night_21_02":     {"fp": _band_sum(h_day, 21, 24, fp_col_h) + _band_sum(h_day, 0, 2, fp_col_h),
+                                    "visitors": _band_sum(h_day, 21, 24, "visitor_count") + _band_sum(h_day, 0, 2, "visitor_count")},
+            }
+            # Top-3 peak hours
+            peak_rows = h_day.sort_values("visitor_count", ascending=False).head(3)
+            metrics["peak_hours"] = [
+                {"hour": int(r["hour"]), "visitors": int(r["visitor_count"]), "fp": int(r.get(fp_col_h, r.get("floating_count", 0)))}
+                for _, r in peak_rows.iterrows()
+            ]
 
-    # Full available data context (up to _AI_MAX_DAYS)
-    qc = "quality_cvr" if has_quality else "conversion_rate"
-    dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
-    sorted_stats = daily_stats.sort_values("date")
+    # ── 날씨 ──────────────────────────────────────────────────────────────
+    for col in ("day_type", "weather", "temp_max", "temp_min", "precipitation"):
+        if col in row.index:
+            metrics[col] = float(row.get(col, 0)) if col in ("temp_max", "temp_min", "precipitation") else str(row.get(col, ""))
+
+    # ── 트렌드 방향성 ─────────────────────────────────────────────────────
+    sorted_stats = daily_stats.sort_values("date").reset_index(drop=True)
     n_total = len(sorted_stats)
-
-    # Provide full data summary for AI
     metrics["total_days_available"] = n_total
-    metrics["all_period_avg_fp"] = float(sorted_stats["floating_unique"].mean())
-    metrics["all_period_avg_v"] = float(sorted_stats["visitor_count"].mean())
+    _fp_avg_col = fp_col_daily if fp_col_daily in sorted_stats.columns else "floating_unique"
+    metrics["all_period_avg_fp"]  = float(sorted_stats[_fp_avg_col].mean())
+    metrics["all_period_avg_v"]   = float(sorted_stats["visitor_count"].mean())
     metrics["all_period_avg_cvr"] = float(sorted_stats[qc].mean())
 
-    # Day-type summary for full period
+    today_idx = sorted_stats[sorted_stats["date"].astype(str) == date_str].index
+    if len(today_idx) > 0:
+        idx = today_idx[0]
+        # 전주 동요일 비교
+        same_dow_rows = sorted_stats[sorted_stats["weekday"] == row.get("weekday", -1)] if "weekday" in sorted_stats.columns else pd.DataFrame()
+        prev_same_dow = same_dow_rows[same_dow_rows.index < idx].tail(1)
+        if not prev_same_dow.empty:
+            pr = prev_same_dow.iloc[0]
+            pr_fp = int(pr.get(_fp_avg_col, pr.get("floating_unique", 0)))
+            metrics["vs_same_dow_last_week"] = {
+                "date": str(pr["date"]),
+                "fp_delta_pct": round((metrics["fp"] - pr_fp) / max(pr_fp, 1) * 100, 1),
+                "visitor_delta_pct": round((metrics["visitors"] - int(pr.get("visitor_count", 0))) / max(int(pr.get("visitor_count", 1)), 1) * 100, 1),
+            }
+        # 최근 7일 트렌드 (선형 방향)
+        recent7 = sorted_stats[sorted_stats.index < idx].tail(7)
+        if len(recent7) >= 3:
+            v_series = recent7["visitor_count"].values
+            slope = float(v_series[-1] - v_series[0]) / max(len(v_series) - 1, 1)
+            if slope > 5:
+                trend = "increasing"
+            elif slope < -5:
+                trend = "decreasing"
+            else:
+                trend = "stable"
+            metrics["recent_7day_trend"] = trend
+            metrics["recent_7day_avg_v"] = round(float(v_series.mean()), 1)
+
+    # ── Day-type / Weather 요약 ───────────────────────────────────────────
     if "day_type" in sorted_stats.columns:
-        daytype_summary = sorted_stats.groupby("day_type").agg({
-            "floating_unique": "mean",
-            "visitor_count": "mean",
-            qc: "mean",
-        }).round(1).to_dict(orient="index")
-        metrics["daytype_summary"] = daytype_summary
-
-    # Weather summary for full period
+        metrics["daytype_summary"] = sorted_stats.groupby("day_type").agg(
+            {_fp_avg_col: "mean", "visitor_count": "mean", qc: "mean"}
+        ).rename(columns={_fp_avg_col: "floating_unique"}).round(1).to_dict(orient="index")
     if "weather" in sorted_stats.columns:
-        weather_summary = sorted_stats.groupby("weather").agg({
-            "floating_unique": "mean",
-            "visitor_count": "mean",
-            qc: "mean",
-        }).round(1).to_dict(orient="index")
-        metrics["weather_summary"] = weather_summary
+        metrics["weather_summary"] = sorted_stats.groupby("weather").agg(
+            {_fp_avg_col: "mean", "visitor_count": "mean", qc: "mean"}
+        ).rename(columns={_fp_avg_col: "floating_unique"}).round(1).to_dict(orient="index")
 
-    # Recent days table: up to _AI_MAX_DAYS (30)
+    # ── 날짜별 히스토리 테이블 ────────────────────────────────────────────
     recent_days = sorted_stats.tail(_AI_MAX_DAYS)
     if len(recent_days) >= 2:
         recent_rows = []
         for _, r in recent_days.iterrows():
             entry = {
                 "date": str(r["date"]),
-                "fp": int(r.get("floating_unique", 0)),
+                "fp": int(r.get(_fp_avg_col, r.get("floating_unique", 0))),
                 "visitors": int(r.get("visitor_count", 0)),
                 "cvr": round(float(r.get(qc, 0)), 1),
                 "dwell_min": round(float(r.get(dwell_col, 0)) / 60, 1),
             }
-            if "day_type" in r.index:
-                entry["day_type"] = str(r.get("day_type", ""))
-            if "weather" in r.index:
-                entry["weather"] = str(r.get("weather", ""))
-            if "temp_max" in r.index:
-                entry["temp"] = f"{r.get('temp_min', 0):.0f}~{r.get('temp_max', 0):.0f}"
+            if "day_type" in r.index: entry["day_type"] = str(r.get("day_type", ""))
+            if "weather" in r.index:  entry["weather"]  = str(r.get("weather", ""))
+            if "temp_max" in r.index: entry["temp"] = f"{r.get('temp_min', 0):.0f}~{r.get('temp_max', 0):.0f}"
             recent_rows.append(entry)
         metrics["history_days"] = recent_rows
         metrics["history_count"] = len(recent_rows)
-        # Period averages for the displayed history
-        metrics["period_avg_fp"] = float(recent_days["floating_unique"].mean())
-        metrics["period_avg_v"] = float(recent_days["visitor_count"].mean())
+        metrics["period_avg_fp"]  = float(recent_days[_fp_avg_col].mean())
+        metrics["period_avg_v"]   = float(recent_days["visitor_count"].mean())
         metrics["period_avg_cvr"] = float(recent_days[qc].mean())
 
     space_notes = st.session_state.get("current_space_notes", "")
@@ -660,6 +742,7 @@ def _render_comparison(
     space_name: str,
     loader: CacheLoader,
     time_range: tuple[int, int],
+    fp_coverage: str = "medium",
 ) -> None:
     """Multi-date comparison: Summary -> Trend -> Dwell -> AI."""
 
@@ -681,6 +764,8 @@ def _render_comparison(
     qc = "quality_cvr" if has_quality else "conversion_rate"
     dwell_col = "dwell_median_seconds" if has_median else "dwell_seconds_mean"
 
+    fp_col = _fp_col(ds, fp_coverage)
+
     # -- Build x-axis labels: "03-29(Sat)☀️" --
     _DOW = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
     _WICON = {"Sunny": "☀️", "Rain": "🌧", "Snow": "❄️"}
@@ -701,9 +786,9 @@ def _render_comparison(
     ds["x_label"] = ds.apply(_x_label, axis=1)
 
     # -- KPI summary cards (first) --
-    avg_fp = ds["floating_unique"].mean()
+    avg_fp = ds[fp_col].mean()
     avg_v = ds["visitor_count"].mean()
-    avg_cvr = ds["conversion_rate"].mean()  # Use standard CVR for consistency
+    avg_cvr = (avg_v / avg_fp * 100.0) if avg_fp > 0 else 0.0
     avg_dwell = ds[dwell_col].mean()
     mm, ss = int(avg_dwell) // 60, int(avg_dwell) % 60
 
@@ -734,7 +819,7 @@ def _render_comparison(
     # -- WoW Comparison --
     if len(ds) >= 14:
         render_section_header("Week-over-Week Comparison")
-        wow = _cached_wow(ds)
+        wow = _cached_wow(ds, fp_col=fp_col)
         if wow:
             tw = wow.get("this_week", {})
             d = wow.get("delta", {})
@@ -759,7 +844,7 @@ def _render_comparison(
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=ds["x_label"], y=ds["floating_unique"],
+        x=ds["x_label"], y=ds[fp_col],
         name="Floating Pop",
         line=dict(color=FP_COLOR, width=2),
         mode="lines+markers",
@@ -790,8 +875,12 @@ def _render_comparison(
     render_section_header("CVR Trend")
 
     fig_cvr = go.Figure()
-    # Use conversion_rate (visitors/FP) — consistent with Intraday chart
-    cvr_col = "conversion_rate"
+    # Recompute CVR dynamically from the selected coverage column so it responds to fp_coverage
+    ds["cvr_dynamic"] = ds.apply(
+        lambda r: round(r["visitor_count"] / r[fp_col] * 100.0, 2) if r.get(fp_col, 0) > 0 else 0.0,
+        axis=1,
+    )
+    cvr_col = "cvr_dynamic"
     fig_cvr.add_trace(go.Scatter(
         x=ds["x_label"], y=ds[cvr_col],
         name="CVR (%)",
@@ -863,7 +952,7 @@ def _render_comparison(
     if "day_type" in ds.columns:
         render_section_header("Weekday vs Weekend Pattern")
         dt_summary = ds.groupby("day_type").agg(
-            Avg_FP=("floating_unique", "mean"),
+            Avg_FP=(fp_col, "mean"),
             Avg_Visitors=("visitor_count", "mean"),
             Avg_CVR=(qc, "mean"),
             Days=("date", "count"),
@@ -874,7 +963,7 @@ def _render_comparison(
     if "weather" in ds.columns:
         render_section_header("Weather Impact")
         w_summary = ds.groupby("weather").agg(
-            Avg_FP=("floating_unique", "mean"),
+            Avg_FP=(fp_col, "mean"),
             Avg_Visitors=("visitor_count", "mean"),
             Avg_CVR=(qc, "mean"),
             Days=("date", "count"),
@@ -896,15 +985,15 @@ def _render_comparison(
         ai_lang2 = st.selectbox("Language", ["English", "한국어"], key="comparison_ai_lang", label_visibility="collapsed")
     with col_btn2:
         if st.button("Generate Period Analysis", type="primary", use_container_width=True, key="comparison_ai_btn"):
-            _run_comparison_ai(space_name, ds, loader, time_range, lang=ai_lang2)
+            _run_comparison_ai(space_name, ds, loader, time_range, lang=ai_lang2, fp_coverage=fp_coverage)
 
     # -- Daily Detail Table (at bottom, collapsed) --
     st.markdown("---")
     with st.expander("Daily Detail Table", expanded=False):
-        summary_df = ds[["date", "floating_unique", "visitor_count", qc, dwell_col]].copy()
+        summary_df = ds[["date", fp_col, "visitor_count", qc, dwell_col]].copy()
         summary_df = summary_df.rename(columns={
             "date": "Date",
-            "floating_unique": "FP",
+            fp_col: "FP",
             "visitor_count": "Visitors",
             qc: "CVR (%)",
             dwell_col: "Dwell (sec)",
@@ -923,52 +1012,98 @@ def _run_comparison_ai(
     loader: CacheLoader,
     time_range: tuple[int, int],
     lang: str = "English",
+    fp_coverage: str = "medium",
 ) -> None:
-    """Run AI analysis for comparison mode."""
+    """Run AI analysis for comparison mode — enriched with trend direction and Korean calendar."""
 
     has_quality = "quality_cvr" in ds.columns
     qc = "quality_cvr" if has_quality else "conversion_rate"
     dwell_col = "dwell_median_seconds" if "dwell_median_seconds" in ds.columns else "dwell_seconds_mean"
+    fp_col = _fp_col(ds, fp_coverage)
+    fp_vals = ds[fp_col] if fp_col in ds.columns else ds["floating_unique"]
+
+    ds_sorted = ds.sort_values("date").reset_index(drop=True)
 
     metrics = {
         "space_name": space_name,
-        "n_days": len(ds),
-        "date_range": f"{ds['date'].min()} ~ {ds['date'].max()}",
-        "avg_fp": float(ds["floating_unique"].mean()),
-        "avg_visitors": float(ds["visitor_count"].mean()),
-        "avg_cvr": float(ds[qc].mean()),
-        "avg_dwell_sec": float(ds[dwell_col].mean()),
-        "total_fp": int(ds["floating_unique"].sum()),
-        "total_visitors": int(ds["visitor_count"].sum()),
+        "n_days": len(ds_sorted),
+        "date_range": f"{ds_sorted['date'].min()} ~ {ds_sorted['date'].max()}",
+        "avg_fp": round(float(fp_vals.mean()), 0),
+        "avg_visitors": round(float(ds_sorted["visitor_count"].mean()), 1),
+        "avg_cvr": round(float(ds_sorted[qc].mean()), 1),
+        "avg_dwell_sec": round(float(ds_sorted[dwell_col].mean()), 0),
+        "total_fp": int(fp_vals.sum()),
+        "total_visitors": int(ds_sorted["visitor_count"].sum()),
     }
 
     # Best / worst days
-    best_day = ds.loc[ds["visitor_count"].idxmax()]
-    worst_day = ds.loc[ds["visitor_count"].idxmin()]
-    metrics["best_day"] = {"date": str(best_day["date"]), "visitors": int(best_day["visitor_count"])}
-    metrics["worst_day"] = {"date": str(worst_day["date"]), "visitors": int(worst_day["visitor_count"])}
+    best_day  = ds_sorted.loc[ds_sorted["visitor_count"].idxmax()]
+    worst_day = ds_sorted.loc[ds_sorted["visitor_count"].idxmin()]
+    metrics["best_day"]  = {"date": str(best_day["date"]),  "visitors": int(best_day["visitor_count"]),  "cvr": round(float(best_day.get(qc, 0)), 1)}
+    metrics["worst_day"] = {"date": str(worst_day["date"]), "visitors": int(worst_day["visitor_count"]), "cvr": round(float(worst_day.get(qc, 0)), 1)}
 
-    # Day type breakdown
-    if "day_type" in ds.columns:
-        dt_agg = ds.groupby("day_type")[qc].mean().to_dict()
-        metrics["day_type_cvr"] = {str(k): round(v, 1) for k, v in dt_agg.items()}
+    # ── 트렌드 방향 (전반부 vs 후반부) ───────────────────────────────────
+    n = len(ds_sorted)
+    if n >= 4:
+        half = n // 2
+        first_half_avg  = float(ds_sorted["visitor_count"].iloc[:half].mean())
+        second_half_avg = float(ds_sorted["visitor_count"].iloc[half:].mean())
+        delta_pct = round((second_half_avg - first_half_avg) / max(first_half_avg, 1) * 100, 1)
+        metrics["trend_direction"] = "increasing" if delta_pct > 5 else ("decreasing" if delta_pct < -5 else "stable")
+        metrics["trend_delta_pct"] = delta_pct
+        metrics["first_half_avg_v"]  = round(first_half_avg, 1)
+        metrics["second_half_avg_v"] = round(second_half_avg, 1)
 
-    # Weather breakdown (CVR + temperature + precipitation per weather type)
-    if "weather" in ds.columns:
-        w_agg = ds.groupby("weather")[qc].mean().to_dict()
-        metrics["weather_cvr"] = {str(k): round(v, 1) for k, v in w_agg.items()}
-        # Avg visitors by weather
-        w_visitors = ds.groupby("weather")["visitor_count"].mean().to_dict()
-        metrics["weather_visitors"] = {str(k): round(v, 0) for k, v in w_visitors.items()}
+    # ── 요일별 패턴 ────────────────────────────────────────────────────
+    if "day_type" in ds_sorted.columns:
+        dt_grp = ds_sorted.groupby("day_type").agg(
+            avg_fp=   (fp_col if fp_col in ds_sorted.columns else "floating_unique", "mean"),
+            avg_v=    ("visitor_count", "mean"),
+            avg_cvr=  (qc, "mean"),
+            days=     ("date", "count"),
+        ).round(1)
+        metrics["day_type_summary"] = dt_grp.to_dict(orient="index")
 
-    # Temperature & precipitation summary
-    if "temp_max" in ds.columns:
-        metrics["temp_range"] = f"{ds['temp_min'].min():.1f}°C ~ {ds['temp_max'].max():.1f}°C"
-        metrics["avg_temp"] = f"{((ds['temp_max'] + ds['temp_min']) / 2).mean():.1f}°C"
-    if "precipitation" in ds.columns:
-        rainy_days = int((ds["precipitation"] > 0).sum())
-        metrics["rainy_days"] = rainy_days
-        metrics["total_precipitation"] = round(float(ds["precipitation"].sum()), 1)
+    # ── 날씨별 패턴 ────────────────────────────────────────────────────
+    if "weather" in ds_sorted.columns:
+        w_grp = ds_sorted.groupby("weather").agg(
+            avg_v=   ("visitor_count", "mean"),
+            avg_cvr= (qc, "mean"),
+            days=    ("date", "count"),
+        ).round(1)
+        metrics["weather_summary"] = w_grp.to_dict(orient="index")
+
+    if "temp_max" in ds_sorted.columns:
+        metrics["temp_range"] = f"{ds_sorted['temp_min'].min():.1f}~{ds_sorted['temp_max'].max():.1f}°C"
+        metrics["avg_temp"]   = f"{((ds_sorted['temp_max'] + ds_sorted['temp_min']) / 2).mean():.1f}°C"
+    if "precipitation" in ds_sorted.columns:
+        metrics["rainy_days"]          = int((ds_sorted["precipitation"] > 0).sum())
+        metrics["total_precipitation"] = round(float(ds_sorted["precipitation"].sum()), 1)
+
+    # ── 한국 캘린더 — 기간 내 공휴일 목록 ────────────────────────────────
+    holiday_list = []
+    for date_val in ds_sorted["date"].astype(str):
+        cal = get_korean_calendar_context(date_val)
+        if cal.get("is_holiday"):
+            holiday_list.append({"date": date_val, "name": cal["holiday_name"]})
+    if holiday_list:
+        metrics["holidays_in_period"] = holiday_list
+
+    # ── 날짜별 상세 테이블 ────────────────────────────────────────────
+    detail_rows = []
+    for _, r in ds_sorted.iterrows():
+        entry = {
+            "date":      str(r["date"]),
+            "fp":        int(r.get(fp_col, r.get("floating_unique", 0))),
+            "visitors":  int(r.get("visitor_count", 0)),
+            "cvr":       round(float(r.get(qc, 0)), 1),
+            "dwell_min": round(float(r.get(dwell_col, 0)) / 60, 1),
+        }
+        if "day_type" in r.index: entry["day_type"] = str(r.get("day_type", ""))
+        if "weather"  in r.index: entry["weather"]  = str(r.get("weather",  ""))
+        if "temp_max" in r.index: entry["temp"]     = f"{r.get('temp_min', 0):.0f}~{r.get('temp_max', 0):.0f}°C"
+        detail_rows.append(entry)
+    metrics["daily_table"] = detail_rows
 
     space_notes = st.session_state.get("current_space_notes", "")
     with st.spinner("AI is analyzing period data..."):
@@ -1128,198 +1263,289 @@ def _get_sector_behavior_context(space_name: str) -> str:
 
 
 def _build_daily_ai_prompt(metrics: dict) -> str:
-    """Build user prompt for daily AI analysis with 3-section structure.
-
-    Enhanced to include full available history (up to 30 days) with period summaries.
-    """
+    """Build user prompt for daily AI analysis — enriched with hourly bands, trend, Korean calendar."""
     dwell_min = metrics.get("dwell_sec", 0) / 60
     space_name = metrics.get("space_name", "Unknown")
+    lang = "한국어"  # GS25 Yeoksam is a Korean store — respond in Korean by default
 
     lines = [
         _get_sector_context(space_name),
-        _get_sector_behavior_context(space_name),
-        f"[Date: {metrics.get('date', 'N/A')}]",
+        f"[분석 날짜: {metrics.get('date', 'N/A')}]",
         "",
-        "[Today's Metrics]",
-        f"- Floating Population (passersby): {metrics.get('fp', 0):,}",
-        f"- Visitors (entered store): {metrics.get('visitors', 0):,}",
-        f"- CVR (conversion rate): {metrics.get('cvr', 0):.1f}%",
-        f"- Dwell Time (median): {dwell_min:.1f} min",
     ]
 
+    # ── 오늘 핵심 지표 ──────────────────────────────────────────────────────
+    lines += [
+        "[오늘 핵심 지표]",
+        f"- 유동인구 (매장 근처 탐지): {metrics.get('fp', 0):,}명",
+        f"- 방문자 (실제 입장 확인): {metrics.get('visitors', 0):,}명",
+        f"- CVR (전환율): {metrics.get('cvr', 0):.1f}%  ← 강남 골목 CVS 벤치마크: 2~5%",
+        f"- 체류시간 (중앙값): {dwell_min:.1f}분",
+    ]
+
+    # ── 한국 캘린더 컨텍스트 ───────────────────────────────────────────────
+    cal = metrics.get("korean_calendar", {})
+    if cal:
+        cal_lines = ["", "[한국 사회 캘린더 컨텍스트]"]
+        if cal.get("is_holiday"):
+            cal_lines.append(f"- ⚠️  오늘은 공휴일: {cal['holiday_name']} → 강남 오피스 공실, 직장인 수요 급감")
+        if cal.get("is_long_weekend") and not cal.get("is_holiday"):
+            cal_lines.append("- ⚠️  연휴 기간: 직장인 이탈, 유동인구 감소 예상")
+        if cal.get("days_to_next_holiday") == 1:
+            cal_lines.append(f"- 내일 공휴일 ({cal['next_holiday_name']}): 오늘 저녁 사전 구매 수요 상승 가능")
+        if cal.get("days_since_last_holiday") == 1:
+            cal_lines.append(f"- 어제 공휴일 ({cal['last_holiday_name']}) 다음날: 직장인 복귀 → 오전 피크 급증")
+        cal_lines.append(f"- 학기 현황: {cal.get('school_term', '')}")
+        if cal.get("retail_calendar_note") and cal["retail_calendar_note"] != "일반 평일/주말 패턴":
+            cal_lines.append(f"- 유통 시사점: {cal['retail_calendar_note']}")
+        lines += cal_lines
+
+    # ── 날씨/요일 컨텍스트 ─────────────────────────────────────────────────
+    ctx = []
+    if "day_type" in metrics:
+        ctx.append(f"- 요일 유형: {metrics['day_type']}")
+    if "weather" in metrics:
+        w = metrics["weather"]
+        if "temp_max" in metrics:
+            w += f", 최고 {metrics['temp_max']:.1f}°C / 최저 {metrics['temp_min']:.1f}°C"
+        if metrics.get("precipitation", 0) > 0:
+            w += f", 강수 {metrics['precipitation']:.1f}mm"
+        ctx.append(f"- 날씨: {w}")
+    if ctx:
+        lines += ["", "[날씨 & 요일]"] + ctx
+
+    # ── 시간대별 패턴 ──────────────────────────────────────────────────────
+    bands = metrics.get("hourly_bands", {})
+    if bands:
+        lines += ["", "[시간대별 유동인구 & 방문자 (오늘)]",
+                  "시간대         | 유동인구 | 방문자",
+                  "-------------- | -------- | ------"]
+        band_labels = {
+            "morning_07_09":   "출근(07-09시)",
+            "lunch_12_14":     "점심(12-14시)",
+            "afternoon_14_18": "오후(14-18시)",
+            "evening_18_21":   "퇴근(18-21시)",
+            "night_21_02":     "야간(21-02시)",
+        }
+        for key, label in band_labels.items():
+            b = bands.get(key, {})
+            lines.append(f"{label:14s} | {b.get('fp', 0):8,} | {b.get('visitors', 0):6,}")
+
+    peaks = metrics.get("peak_hours", [])
+    if peaks:
+        lines += ["", "[오늘 TOP 3 피크 시간]"]
+        for i, p in enumerate(peaks, 1):
+            lines.append(f"  #{i}: {p['hour']:02d}시 — 방문자 {p['visitors']}명 (유동인구 {p['fp']}명)")
+
+    # ── 체류 분포 ──────────────────────────────────────────────────────────
     if "dwell_1_3min_pct" in metrics:
-        lines.extend([
-            "",
-            "[Dwell Breakdown (visitors only, min 60s filter applied)]",
-            f"- 1~3 min: {metrics['dwell_1_3min_pct']}%",
-            f"- 3~6 min: {metrics['dwell_3_6min_pct']}%",
-            f"- 6~10 min: {metrics['dwell_6_10min_pct']}%",
-            f"- 10~15 min: {metrics['dwell_10_15min_pct']}%",
-            f"- 15+ min: {metrics['dwell_15plus_pct']}%",
-            "Note: MAC randomization limits long-stay tracking. 15min+ may be underestimated.",
-        ])
+        lines += [
+            "", "[체류시간 분포 (방문자 기준, 최소 60초 필터 적용)]",
+            f"- 1~3분 (즉시구매): {metrics['dwell_1_3min_pct']}%",
+            f"- 3~6분 (탐색/식사): {metrics['dwell_3_6min_pct']}%",
+            f"- 6~10분 (심층탐색): {metrics['dwell_6_10min_pct']}%",
+            f"- 10~15분 (장시간 체류): {metrics['dwell_10_15min_pct']}%",
+            f"- 15분+ (매장 이용/휴식): {metrics['dwell_15plus_pct']}%  ← MAC 로테이션으로 과소평가 가능",
+        ]
 
-    # Full period summary (all available data)
+    # ── 트렌드 방향 ────────────────────────────────────────────────────────
+    if "recent_7day_trend" in metrics:
+        trend_kr = {"increasing": "📈 상승 추세", "decreasing": "📉 하락 추세", "stable": "➡️ 보합"}.get(metrics["recent_7day_trend"], "")
+        lines += ["", f"[최근 7일 추세] {trend_kr} (7일 평균 방문자: {metrics.get('recent_7day_avg_v', 0):.0f}명)"]
+    if "vs_same_dow_last_week" in metrics:
+        c = metrics["vs_same_dow_last_week"]
+        lines.append(f"  - 전주 동요일({c['date']}) 대비: 유동인구 {c['fp_delta_pct']:+.1f}%, 방문자 {c['visitor_delta_pct']:+.1f}%")
+
+    # ── 전체 기간 요약 ─────────────────────────────────────────────────────
     n_total = metrics.get("total_days_available", 0)
-    if n_total > 0:
-        lines.extend([
-            "",
-            f"[Full Period Summary — {n_total} days total]",
-            f"- Overall Avg FP: {metrics.get('all_period_avg_fp', 0):.0f}",
-            f"- Overall Avg Visitors: {metrics.get('all_period_avg_v', 0):.0f}",
-            f"- Overall Avg CVR: {metrics.get('all_period_avg_cvr', 0):.1f}%",
-        ])
+    if n_total:
+        lines += [
+            "", f"[전체 기간 평균 — {n_total}일]",
+            f"- 평균 유동인구: {metrics.get('all_period_avg_fp', 0):.0f}명",
+            f"- 평균 방문자: {metrics.get('all_period_avg_v', 0):.0f}명",
+            f"- 평균 CVR: {metrics.get('all_period_avg_cvr', 0):.1f}%",
+        ]
 
-    # Day-type summary
     daytype_summary = metrics.get("daytype_summary", {})
     if daytype_summary:
-        lines.extend(["", "[By Day Type — Full Period]"])
-        for dt, vals in daytype_summary.items():
-            fp_val = vals.get("floating_unique", 0)
-            v_val = vals.get("visitor_count", 0)
-            cvr_val = vals.get("quality_cvr", vals.get("conversion_rate", 0))
-            lines.append(f"  - {dt}: FP {fp_val:.0f}, Visitors {v_val:.0f}, CVR {cvr_val:.1f}%")
+        lines += ["", "[요일 유형별 평균 (전체 기간)"]
+        for dt, v in daytype_summary.items():
+            lines.append(f"  - {dt}: 방문자 {v.get('visitor_count', 0):.0f}명, CVR {v.get('quality_cvr', v.get('conversion_rate', 0)):.1f}%")
 
-    # Weather summary
     weather_summary = metrics.get("weather_summary", {})
     if weather_summary:
-        lines.extend(["", "[By Weather — Full Period]"])
-        for w, vals in weather_summary.items():
-            fp_val = vals.get("floating_unique", 0)
-            v_val = vals.get("visitor_count", 0)
-            cvr_val = vals.get("quality_cvr", vals.get("conversion_rate", 0))
-            lines.append(f"  - {w}: FP {fp_val:.0f}, Visitors {v_val:.0f}, CVR {cvr_val:.1f}%")
+        lines += ["", "[날씨별 평균 (전체 기간)]"]
+        for w, v in weather_summary.items():
+            lines.append(f"  - {w}: 방문자 {v.get('visitor_count', 0):.0f}명, CVR {v.get('quality_cvr', v.get('conversion_rate', 0)):.1f}%")
 
-    # Recent history table (up to 30 days)
+    # ── 날짜별 히스토리 ────────────────────────────────────────────────────
     history_days = metrics.get("history_days", [])
     history_count = metrics.get("history_count", len(history_days))
     if history_days:
-        lines.extend(["", f"[Recent {history_count} Days — compare today against these]"])
-        lines.append("Date       | DayType  | Weather | Temp       | FP     | Visitors | CVR   | Dwell")
-        lines.append("---------- | -------- | ------- | ---------- | ------ | -------- | ----- | -----")
+        lines += ["", f"[최근 {history_count}일 데이터 — 오늘과 비교]",
+                  "날짜       | 요일유형  | 날씨    | 기온       | 유동인구 | 방문자 | CVR   | 체류",
+                  "---------- | --------- | ------- | ---------- | -------- | ------ | ----- | ----"]
         for d in history_days:
-            today_marker = " ← TODAY" if d["date"] == metrics.get("date") else ""
+            marker = " ← 오늘" if d["date"] == metrics.get("date") else ""
             lines.append(
-                f"{d['date']} | {d.get('day_type', ''):8s} | {d.get('weather', ''):7s} | "
-                f"{d.get('temp', ''):10s} | {d['fp']:6,} | {d['visitors']:8,} | "
-                f"{d['cvr']:5.1f}% | {d['dwell_min']:.1f}m{today_marker}"
+                f"{d['date']} | {d.get('day_type',''):9s} | {d.get('weather',''):7s} | "
+                f"{d.get('temp',''):10s} | {d['fp']:8,} | {d['visitors']:6,} | "
+                f"{d['cvr']:5.1f}% | {d['dwell_min']:.1f}분{marker}"
             )
     if "period_avg_fp" in metrics:
-        lines.extend([
-            "",
-            f"[{history_count}-Day Average] FP: {metrics['period_avg_fp']:.0f}, "
-            f"Visitors: {metrics['period_avg_v']:.0f}, "
-            f"CVR: {metrics['period_avg_cvr']:.1f}%",
-        ])
-
-    # Day type + Weather context (important factor for traffic analysis)
-    context_lines = []
-    if "day_type" in metrics:
-        context_lines.append(f"- Day Type: {metrics['day_type']}")
-    if "weather" in metrics:
-        weather_str = metrics["weather"]
-        if "temp_max" in metrics and "temp_min" in metrics:
-            weather_str += f", High {metrics['temp_max']:.1f}°C / Low {metrics['temp_min']:.1f}°C"
-        if "precipitation" in metrics and metrics["precipitation"] > 0:
-            weather_str += f", Precipitation {metrics['precipitation']:.1f}mm"
-        context_lines.append(f"- Weather: {weather_str}")
-    if context_lines:
-        lines.extend(["", "[Context — Day & Weather]"] + context_lines)
+        lines += ["", f"[{history_count}일 평균] 유동인구: {metrics['period_avg_fp']:.0f}명, "
+                  f"방문자: {metrics['period_avg_v']:.0f}명, CVR: {metrics['period_avg_cvr']:.1f}%"]
 
     space_notes = st.session_state.get("current_space_notes", "")
     if space_notes:
-        lines.append(f"\n[Space Notes: {space_notes}]")
+        lines += ["", f"[매장 메모]: {space_notes}"]
 
-    lines.extend([
+    lines += [
         "",
-        "Respond in EXACTLY 3 labeled sections (use these labels as-is):",
+        "위 데이터를 바탕으로 아래 정확히 3개 섹션으로 답하세요 (레이블 그대로 사용):",
         "",
         "PERFORMANCE:",
-        f"Compare today vs the {history_count}-day history table above. "
-        "Also consider the full-period and day-type summaries. "
-        "Explain WHY today is higher/lower than similar days (same day-type, same weather). "
-        "Reference specific dates from the table for comparison. 2-3 sentences.",
+        "오늘 성과를 히스토리 테이블의 같은 요일 유형, 유사 날씨 날짜들과 비교하여 설명하세요. "
+        "한국 사회 캘린더(공휴일, 날씨, 요일 특성)를 연결해 왜 높거나 낮은지 원인을 분석하세요. "
+        "구체적인 날짜와 수치를 인용. 3~4문장.",
         "",
         "BEHAVIOR:",
-        "Analyze dwell quality (short vs medium vs long ratio). "
-        "What does the dwell pattern reveal about customer engagement? "
-        "Note any time-of-day or day-type effects. 2-3 sentences.",
+        "시간대별 유동인구 패턴을 분석하세요 (출근/점심/퇴근/야간 중 어느 시간대가 강한지). "
+        "체류시간 분포가 오늘 방문자의 구매 행동(즉시구매 vs 탐색 vs 장시간 이용)을 어떻게 설명하는지 서술. "
+        "3~4문장.",
         "",
         "RECOMMENDATIONS:",
-        "Provide 3 specific, actionable recommendations. Each must be one of:",
-        "- Advertising/promotion timing (when to run promos based on traffic patterns)",
-        "- Location value (how efficiently the store converts passersby to visitors)",
-        "- Store operations (staffing, display changes, inventory based on dwell patterns)",
+        "실제 실행 가능한 3가지 권고사항을 제시하세요:",
+        "① 프로모션/광고 타이밍 — 언제, 어떤 채널, 왜 (데이터 근거 포함)",
+        "② 매장 운영 최적화 — 인력 배치 또는 진열 변경 (구체적 시간대/요일 명시)",
+        "③ 다음 동향 예측 — 가까운 공휴일/날씨/트렌드 기반으로 다음 주 대비사항",
         "",
-        "Total: under 200 words. English only. Use numbers.",
-    ])
+        "총 350자 이내 (한국어). 반드시 숫자와 날짜를 포함할 것.",
+    ]
 
     return "\n".join(lines)
 
 
 def _build_comparison_ai_prompt(metrics: dict) -> str:
-    """Build user prompt for comparison AI analysis with 3-section structure."""
+    """Build user prompt for comparison AI analysis — Korean, structured, calendar-aware."""
     space_name = metrics.get("space_name", "Unknown")
+    n_days = metrics.get("n_days", 0)
     lines = [
         _get_sector_context(space_name),
         _get_sector_behavior_context(space_name),
-        f"[Period: {metrics.get('date_range', 'N/A')} ({metrics.get('n_days', 0)} days)]",
         "",
-        "[Period Averages]",
-        f"- Avg Daily FP: {metrics.get('avg_fp', 0):.0f}",
-        f"- Avg Daily Visitors: {metrics.get('avg_visitors', 0):.0f}",
-        f"- Avg CVR: {metrics.get('avg_cvr', 0):.1f}%",
-        f"- Avg Dwell: {metrics.get('avg_dwell_sec', 0) / 60:.1f} min",
-        f"- Total FP: {metrics.get('total_fp', 0):,}",
-        f"- Total Visitors: {metrics.get('total_visitors', 0):,}",
+        f"[분석 기간: {metrics.get('date_range', 'N/A')} ({n_days}일)]",
+        "",
+        "[기간 평균]",
+        f"- 일 평균 유동인구: {metrics.get('avg_fp', 0):.0f}명",
+        f"- 일 평균 방문자: {metrics.get('avg_visitors', 0):.0f}명",
+        f"- 평균 CVR: {metrics.get('avg_cvr', 0):.1f}%",
+        f"- 평균 체류시간: {metrics.get('avg_dwell_sec', 0) / 60:.1f}분",
+        f"- 기간 합계 유동인구: {metrics.get('total_fp', 0):,}명",
+        f"- 기간 합계 방문자: {metrics.get('total_visitors', 0):,}명",
     ]
 
+    # 트렌드 방향
+    if "trend_direction" in metrics:
+        direction_kr = {"increasing": "상승", "decreasing": "하락", "stable": "보합"}.get(
+            metrics["trend_direction"], metrics["trend_direction"]
+        )
+        lines.extend([
+            "",
+            "[트렌드 방향 (전반부 vs 후반부)]",
+            f"- 추세: {direction_kr} ({metrics.get('trend_delta_pct', 0):+.1f}%)",
+            f"- 전반부 일평균 방문자: {metrics.get('first_half_avg_v', 0):.0f}명",
+            f"- 후반부 일평균 방문자: {metrics.get('second_half_avg_v', 0):.0f}명",
+        ])
+
+    # Best/Worst day
     best = metrics.get("best_day", {})
     worst = metrics.get("worst_day", {})
-    if best:
-        lines.append(f"- Best Day: {best.get('date')} ({best.get('visitors')} visitors)")
-    if worst:
-        lines.append(f"- Worst Day: {worst.get('date')} ({worst.get('visitors')} visitors)")
-
-    if "day_type_cvr" in metrics:
+    if best or worst:
         lines.append("")
-        lines.append("[CVR by Day Type]")
-        for dt, cvr in metrics["day_type_cvr"].items():
-            lines.append(f"  - {dt}: {cvr}%")
+        lines.append("[최고/최저 날]")
+        if best:
+            lines.append(f"- 최고: {best.get('date')} — 방문자 {best.get('visitors')}명, CVR {best.get('cvr')}%")
+        if worst:
+            lines.append(f"- 최저: {worst.get('date')} — 방문자 {worst.get('visitors')}명, CVR {worst.get('cvr')}%")
 
-    if "weather_cvr" in metrics:
+    # 요일 유형별 패턴
+    if "day_type_summary" in metrics:
         lines.append("")
-        lines.append("[Weather Impact on CVR & Traffic]")
-        for w, cvr in metrics["weather_cvr"].items():
-            avg_v = metrics.get("weather_visitors", {}).get(w, "N/A")
-            lines.append(f"  - {w}: CVR {cvr}%, Avg Visitors {avg_v}")
+        lines.append("[요일 유형별 평균]")
+        for dt, v in metrics["day_type_summary"].items():
+            lines.append(
+                f"  - {dt}: 유동인구 {v.get('avg_fp', 0):.0f}명, "
+                f"방문자 {v.get('avg_v', 0):.0f}명, CVR {v.get('avg_cvr', 0):.1f}% "
+                f"({int(v.get('days', 0))}일)"
+            )
+
+    # 날씨 패턴
+    if "weather_summary" in metrics:
+        lines.append("")
+        lines.append("[날씨별 평균]")
+        for w, v in metrics["weather_summary"].items():
+            lines.append(
+                f"  - {w}: 방문자 {v.get('avg_v', 0):.0f}명, CVR {v.get('avg_cvr', 0):.1f}% "
+                f"({int(v.get('days', 0))}일)"
+            )
     if "temp_range" in metrics:
-        lines.append(f"  - Temperature range: {metrics['temp_range']}")
-        lines.append(f"  - Avg temperature: {metrics['avg_temp']}")
+        lines.append(f"  - 기온 범위: {metrics['temp_range']}, 평균 {metrics.get('avg_temp', '')}")
     if "rainy_days" in metrics:
-        lines.append(f"  - Rainy/snowy days: {metrics['rainy_days']} of {metrics.get('n_days', 0)}")
-        lines.append(f"  - Total precipitation: {metrics.get('total_precipitation', 0)}mm")
+        lines.append(f"  - 우설일 수: {metrics['rainy_days']}/{n_days}일, 합계 강수 {metrics.get('total_precipitation', 0)}mm")
+
+    # 기간 내 공휴일
+    holidays = metrics.get("holidays_in_period", [])
+    if holidays:
+        lines.append("")
+        lines.append("[기간 내 공휴일]")
+        for h in holidays:
+            lines.append(f"  - {h['date']}: {h['name']}")
+
+    # 날짜별 상세 테이블
+    daily = metrics.get("daily_table", [])
+    if daily:
+        lines.append("")
+        lines.append("[일별 상세 데이터]")
+        header = "날짜 | 유동인구 | 방문자 | CVR | 체류(분)"
+        if daily and "day_type" in daily[0]:
+            header += " | 요일유형"
+        if daily and "weather" in daily[0]:
+            header += " | 날씨"
+        lines.append(header)
+        for row in daily:
+            r_line = (
+                f"{row['date']} | {row['fp']:,} | {row['visitors']:,} | "
+                f"{row['cvr']:.1f}% | {row['dwell_min']:.1f}"
+            )
+            if "day_type" in row:
+                r_line += f" | {row['day_type']}"
+            if "weather" in row:
+                r_line += f" | {row['weather']}"
+            if "temp" in row:
+                r_line += f" {row['temp']}"
+            lines.append(r_line)
 
     lines.extend([
         "",
-        "Respond in EXACTLY 3 labeled sections (use these labels as-is):",
+        "─" * 50,
+        "아래 3개 섹션을 정확한 라벨 그대로 한국어로 작성하라.",
         "",
         "PERFORMANCE:",
-        "Summarize the period: overall trend direction, best/worst days, "
-        "and the most notable metric changes. Use specific numbers. 2-3 sentences.",
+        "기간 전체 성과 요약: 트렌드 방향(전반부→후반부 변화율), 최고/최저 날 원인 추론,"
+        " 핵심 지표(FP·CVR·체류) 변화. 수치 포함. 2~3문장.",
         "",
         "PATTERNS:",
-        "Analyze weekday vs weekend differences, weather impact on traffic/CVR, "
-        "and any recurring patterns (e.g., certain days consistently outperform). "
-        "2-3 sentences with numbers.",
+        "반복 패턴 분석: 평일 vs 주말 차이, 날씨·공휴일 영향,"
+        " 특정 요일·기간에 성과가 집중되는 이유(한국 사회 맥락 반영). 수치 포함. 2~3문장.",
         "",
         "STRATEGY:",
-        "Provide 3 specific, actionable recommendations:",
-        "- Promotion timing (which days/hours to invest in advertising based on the data)",
-        "- Location value assessment (is the store efficiently converting its foot traffic?)",
-        "- Operations optimization (staffing, display changes, or inventory timing for next period)",
+        "운영자가 다음 기간에 실행할 수 있는 구체적 제안 3가지:"
+        " ① 프로모션 타이밍(어떤 요일/날씨에 집중할지),"
+        " ② FP 대비 CVR 효율 평가(개선 여지),"
+        " ③ 재고·인력 배치 최적화. 각 제안은 데이터 근거 포함.",
         "",
-        "Total: under 250 words. English only. Use numbers.",
+        "전체 350자 이내. 한국어로.",
     ])
 
     return "\n".join(lines)

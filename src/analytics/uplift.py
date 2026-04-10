@@ -26,9 +26,15 @@ def compute_baseline_weekday(daily_stats: pd.DataFrame) -> Dict[str, float]:
 def compute_week_over_week(
     daily_stats: pd.DataFrame,
     days_per_week: int = 7,
+    fp_col: Optional[str] = None,
 ) -> Dict[str, Dict[str, float]]:
     """
     최근 2주 데이터를 이번 주 / 전주로 나누어 평균 및 delta 반환.
+
+    Parameters
+    ----------
+    fp_col : str, optional
+        Floating population column to use. Defaults to "floating_unique".
 
     Returns
     -------
@@ -45,6 +51,8 @@ def compute_week_over_week(
     this_df = df.tail(days_per_week)
     prev_df = df.head(days_per_week)
 
+    # fp_col 선택: 요청한 컬럼이 없으면 floating_unique로 fallback
+    _fp_col = fp_col if (fp_col and fp_col in df.columns) else "floating_unique"
     qv_col = "quality_visitor_count" if "quality_visitor_count" in df.columns else "visitor_count"
     qc_col = "quality_cvr" if "quality_cvr" in df.columns else "conversion_rate"
     dm_col = "dwell_median_seconds" if "dwell_median_seconds" in df.columns else "dwell_seconds_mean"
@@ -53,13 +61,13 @@ def compute_week_over_week(
         return float(d[col].mean()) if col in d.columns else 0.0
 
     tw = {
-        "floating_unique": _avg(this_df, "floating_unique"),
+        "floating_unique": _avg(this_df, _fp_col),
         "quality_visitor_count": _avg(this_df, qv_col),
         "quality_cvr": _avg(this_df, qc_col),
         "dwell_median_seconds": _avg(this_df, dm_col),
     }
     pw = {
-        "floating_unique": _avg(prev_df, "floating_unique"),
+        "floating_unique": _avg(prev_df, _fp_col),
         "quality_visitor_count": _avg(prev_df, qv_col),
         "quality_cvr": _avg(prev_df, qc_col),
         "dwell_median_seconds": _avg(prev_df, dm_col),

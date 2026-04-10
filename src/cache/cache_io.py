@@ -158,13 +158,17 @@ class CacheLoader:
         return self._daily_results
 
     def get_daily_hourly(self) -> pd.DataFrame:
-        if self._daily_hourly is None:
+        # Coverage 컬럼 없으면 구버전 캐시 → 디스크에서 재로드
+        _cov_cols = ("floating_count_narrow", "floating_count_medium", "floating_count_wide", "floating_count_full")
+        if self._daily_hourly is None or not any(c in self._daily_hourly.columns for c in _cov_cols):
             path = self.cache_dir / "daily_hourly.parquet"
             self._daily_hourly = pd.read_parquet(path) if path.exists() else pd.DataFrame()
         return self._daily_hourly
 
     def get_daily_stats(self) -> pd.DataFrame:
-        if self._daily_stats is None:
+        # Coverage 컬럼 없으면 구버전 캐시 → 디스크에서 재로드
+        _cov_cols = ("floating_narrow", "floating_medium", "floating_wide", "floating_full")
+        if self._daily_stats is None or not any(c in self._daily_stats.columns for c in _cov_cols):
             path = self.cache_dir / "daily_stats.parquet"
             self._daily_stats = pd.read_parquet(path) if path.exists() else pd.DataFrame()
         return self._daily_stats
