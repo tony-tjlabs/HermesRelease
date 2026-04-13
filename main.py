@@ -245,10 +245,10 @@ def _render_sidebar(loader: CacheLoader | None = None) -> tuple[str | None, str,
         fp_coverage = st.radio(
             "Traffic Data Collection Coverage",
             options=["narrow", "medium", "wide", "full"],
-            format_func=lambda x: {"narrow": "🔴 Narrow  (iPhone ≥ -70 dBm)", "medium": "🟡 Medium  (iPhone ≥ -80 dBm)", "wide": "🟢 Wide     (iPhone ≥ -90 dBm)", "full": "⚪ Full      (No RSSI limit)"}[x],
+            format_func=lambda x: {"narrow": "🔴 Narrow  (~7m)", "medium": "🟡 Medium  (General street)", "wide": "🟢 Wide", "full": "⚪ Full      (~50m)"}[x],
             index=1,
             key="hermes_fp_coverage",
-            help="Adjusts the RSSI range for counting passersby.\nNarrow = close range only · Wide = includes distant signals\nFull = all detected signals, no filter\nAndroid threshold is 10 dBm lower than iPhone.",
+            help="Adjusts the detection range for counting passersby.\nNarrow = close range only (~7m) · Medium = general street level\nWide = broader range · Full = all detected signals (~50m)",
         )
 
         # -- Space Notes (Admin: edit / User: read-only) --
