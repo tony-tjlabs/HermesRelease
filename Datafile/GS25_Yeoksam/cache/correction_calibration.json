@@ -1,8 +1,8 @@
 {
   "th_iph": -65,
-  "th_and": -75,
+  "th_and": -80,
   "self_consistency_diff": 0.0,
   "correction_needed": true,
-  "mix_ratio_global": 3.9767,
+  "mix_ratio_global": 8.351,
   "calibration_date_count": 7
 }
