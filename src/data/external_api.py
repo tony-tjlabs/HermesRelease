@@ -133,6 +133,25 @@ def enrich_holidays(df: pd.DataFrame, date_col: str = "date") -> pd.DataFrame:
 _OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 _OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
+
+def _ssl_context():
+    """Return SSL context using certifi bundle if available, else system default."""
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def _safe_float(v) -> float:
+    """Convert value to float; return NaN on failure."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def _weather_tag(precipitation: float, snowfall: float) -> str:
     """
     Derive a simple weather label from daily precipitation / snowfall totals.
@@ -181,20 +200,10 @@ def fetch_weather(
         temp_max (°C), temp_min (°C), weather ("Sunny"|"Rain"|"Snow"|"Unknown")
     """
     import json
-    import ssl
     import urllib.parse
     import urllib.request
 
     _empty = pd.DataFrame(columns=["date", "precipitation", "snowfall", "temp_max", "temp_min", "weather"])
-
-    # Build SSL context — use certifi bundle if available (fixes macOS venv SSL errors),
-    # otherwise fall back to the default context.
-    def _ssl_context() -> ssl.SSLContext:
-        try:
-            import certifi
-            return ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            return ssl.create_default_context()
 
     try:
         params = {
@@ -235,12 +244,6 @@ def fetch_weather(
         snow   = daily.get("snowfall_sum",      [None] * len(dates))
         tmax   = daily.get("temperature_2m_max",[None] * len(dates))
         tmin   = daily.get("temperature_2m_min",[None] * len(dates))
-
-        def _safe_float(v) -> float:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return float("nan")
 
         rows = []
         for d, p, s, tx, tn in zip(dates, precip, snow, tmax, tmin):
@@ -290,18 +293,11 @@ def fetch_weather_forecast(
     Empty DataFrame on failure.
     """
     import json
-    import ssl
     import urllib.parse
     import urllib.request
 
     _empty = pd.DataFrame(columns=["date", "precipitation", "snowfall", "temp_max", "temp_min", "weather"])
-
-    def _ssl_context() -> ssl.SSLContext:
-        try:
-            import certifi
-            return ssl.create_default_context(cafile=certifi.where())
-        except ImportError:
-            return ssl.create_default_context()
+    _valid_weather = {"Sunny", "Rain", "Snow", "Unknown"}
 
     try:
         params = {
@@ -325,36 +321,22 @@ def fetch_weather_forecast(
         snow = daily.get("snowfall_sum", [None] * len(dates))
         tmax = daily.get("temperature_2m_max", [None] * len(dates))
         tmin = daily.get("temperature_2m_min", [None] * len(dates))
-        valid_weather = {"Sunny", "Rain", "Snow", "Unknown"}
         rows = []
         for d, p, s, tx, tn in zip(dates, precip, snow, tmax, tmin):
-            try:
-                p_val = float(p) if p is not None else float("nan")
-            except (TypeError, ValueError):
-                p_val = float("nan")
-            try:
-                s_val = float(s) if s is not None else float("nan")
-            except (TypeError, ValueError):
-                s_val = float("nan")
-            try:
-                tx_val = float(tx) if tx is not None else float("nan")
-            except (TypeError, ValueError):
-                tx_val = float("nan")
-            try:
-                tn_val = float(tn) if tn is not None else float("nan")
-            except (TypeError, ValueError):
-                tn_val = float("nan")
+            p_val  = _safe_float(p)
+            s_val  = _safe_float(s)
+            tx_val = _safe_float(tx)
+            tn_val = _safe_float(tn)
             w = _weather_tag(p_val, s_val)
-            if w not in valid_weather or not w or len(str(w)) > 20:
+            if w not in _valid_weather:
                 w = "Unknown"
-            date_str = str(d)[:10] if d else ""
             rows.append({
-                "date": date_str,
-                "precipitation": round(p_val, 1) if not pd.isna(p_val) else float("nan"),
-                "snowfall": round(s_val, 1) if not pd.isna(s_val) else float("nan"),
-                "temp_max": round(tx_val, 1) if not pd.isna(tx_val) else float("nan"),
-                "temp_min": round(tn_val, 1) if not pd.isna(tn_val) else float("nan"),
-                "weather": w,
+                "date":          str(d)[:10] if d else "",
+                "precipitation": round(p_val,  1) if not pd.isna(p_val)  else float("nan"),
+                "snowfall":      round(s_val,  1) if not pd.isna(s_val)  else float("nan"),
+                "temp_max":      round(tx_val, 1) if not pd.isna(tx_val) else float("nan"),
+                "temp_min":      round(tn_val, 1) if not pd.isna(tn_val) else float("nan"),
+                "weather":       w,
             })
         return pd.DataFrame(rows)
     except Exception as exc:

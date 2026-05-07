@@ -6,10 +6,8 @@ Tab 2: Hourly 시간대분석 — Time-binned analysis (30min / 1hr) + multi-dat
 Tab 3: Patterns 패턴분석 — Day-type, weather, heatmaps, dwell, anomaly
 Tab 4: Report 리포트 — Weekly traffic report + PDF download
 """
-from typing import Optional
 import os
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -17,11 +15,11 @@ import streamlit as st
 
 from src.cache.cache_io import CacheLoader
 from src.analytics.day_type import add_day_type_to_daily_stats, get_day_context, weekday_names_en
-from src.analytics.uplift import compute_baseline_weekday, compute_uplift, compute_week_over_week
+from src.analytics.uplift import compute_uplift, compute_week_over_week
 from src.analytics.heatmap import build_weekday_hour_heatmap, pivot_heatmap
 from src.analytics.device_craft import device_mix_summary, device_mix_by_date
 from src.analytics.dwell_intelligence import dwell_distribution
-from src.analytics.hourly_analysis import hourly_stats_for_date, hourly_stats_flexible, identify_peak_hours
+from src.analytics.hourly_analysis import hourly_stats_flexible, identify_peak_hours
 from src.ui.chart_theme import apply_theme
 from src.ai import (
     call_claude,
@@ -30,7 +28,7 @@ from src.ai import (
     generate_kpi_summary,
     generate_context_comment,
 )
-from src.analytics.weekly_report import get_last_two_weeks, predict_next_week
+from src.analytics.weekly_report import predict_next_week
 from src.data.external_api import fetch_weather_forecast
 from src.config.constants import TIME_UNIT_SECONDS
 # NOTE: src.report (fpdf2) is imported lazily inside render_report_tab()

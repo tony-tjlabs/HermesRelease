@@ -9,9 +9,6 @@ Contains 6 sub-tabs extracted from render_patterns:
 5. Device Mix
 6. AI Tools (Anomaly Detection + Cause Analysis Chat)
 """
-from typing import Optional
-
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go

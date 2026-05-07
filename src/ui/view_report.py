@@ -4,8 +4,6 @@ Hermes Report View — Weekly traffic report generation + PDF download.
 Dark theme v2 — charts use make_plotly_layout for dark preview.
 PDF generation still uses chart_theme.apply_theme for printable output.
 """
-from typing import Optional
-
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
